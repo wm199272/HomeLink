@@ -134,7 +134,7 @@ enum QihooCloudClient {
         let data: [String: Any]
         do {
             data = try await form(
-                url: URL(string: base + "/common/dev/GetList")!,
+                url: URL(string: base + "/common/dev/GetList") ?? loginURL,
                 cookie: cookie(session, includeSid: true),
                 userAgent: "QihooSuperApp_NoPods/11.1.0 (iPhone; iOS 17.0; Scale/3.00)",
                 fields: fields
@@ -189,7 +189,7 @@ enum QihooCloudClient {
         fields["infoType"] = infoType
         fields["sn"] = sn
         let response = try await form(
-            url: URL(string: base + "/clean/cmd/send")!,
+            url: URL(string: base + "/clean/cmd/send") ?? loginURL,
             cookie: cookie(session, includeSid: true),
             userAgent: "QihooSuperApp_NoPods/11.1.0 (iPhone; iOS 17.0; Scale/3.00)",
             fields: fields
@@ -214,7 +214,7 @@ enum QihooCloudClient {
             "taskid": UUID().uuidString.lowercased(),
         ]
         let response = try await form(
-            url: URL(string: base + "/common/user/login")!,
+            url: URL(string: base + "/common/user/login") ?? loginURL,
             cookie: "q=\(q);t=\(t);qid=\(qid)",
             userAgent: "qhsa-iphone-11.1.0",
             fields: fields
