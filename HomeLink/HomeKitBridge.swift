@@ -29,20 +29,18 @@ final class HomeKitBridge: NSObject, HMHomeManagerDelegate {
     }
 
     var isAuthorized: Bool {
-        manager.authorizationStatus == .authorized
+        manager.authorizationStatus.contains(.authorized)
     }
 
     var statusText: String {
-        switch manager.authorizationStatus {
-        case .authorized:
-            "已允许访问家庭"
-        case .restricted:
-            "系统没有开放家庭数据。用付费开发者账号在 Xcode 里打开 HomeKit 能力后再试。"
-        case .notDetermined:
-            "正在请求家庭权限"
-        @unknown default:
-            "家庭权限状态未知"
+        let status = manager.authorizationStatus
+        if status.contains(.authorized) {
+            return "已允许访问家庭"
         }
+        if status.contains(.restricted) {
+            return "系统没有开放家庭数据。用付费开发者账号在 Xcode 里打开 HomeKit 能力后再试。"
+        }
+        return "正在请求家庭权限"
     }
 
     func makeHomes(accountId: UUID) -> [IoTHome] {

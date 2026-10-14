@@ -11,21 +11,25 @@ jobs:
 
       - name: Build for the iOS Simulator
         run: |
+          set -o pipefail
           xcodebuild \
             -project HomeLink.xcodeproj \
             -scheme HomeLink \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' \
             -derivedDataPath build/simulator \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            build
+            CODE_SIGN_IDENTITY="" \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO \
+            build | xcbeautify
           cd build/simulator/Build/Products/Debug-iphonesimulator
           zip -r "$GITHUB_WORKSPACE/HomeLink-simulator.zip" HomeLink.app
 
       - name: Build an unsigned iPhone package
         run: |
+          set -o pipefail
           xcodebuild \
             -project HomeLink.xcodeproj \
             -scheme HomeLink \
@@ -33,10 +37,11 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/device \
-            -allowProvisioningUpdates \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
-            build
+            CODE_SIGN_IDENTITY="" \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO \
+            build | xcbeautify
           mkdir -p Payload
           cp -R build/device/Build/Products/Debug-iphoneos/HomeLink.app Payload/
           zip -r "$GITHUB_WORKSPACE/HomeLink-unsigned.ipa" Payload
