@@ -11,25 +11,37 @@ jobs:
 
       - name: Build for the iOS Simulator
         run: |
-          set -o pipefail
+          set +e
           xcodebuild \
             -project HomeLink.xcodeproj \
             -scheme HomeLink \
             -configuration Debug \
             -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 17,OS=26.5' \
+            -destination 'generic/platform=iOS Simulator' \
             -derivedDataPath build/simulator \
+            CODE_SIGN_STYLE=Manual \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            ONLY_ACTIVE_ARCH=NO \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
-            build | xcbeautify
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            build > "$RUNNER_TEMP/simulator.log" 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "===== compiler errors ====="
+            grep -E "error:" "$RUNNER_TEMP/simulator.log" | head -80
+            echo "===== build tail ====="
+            tail -60 "$RUNNER_TEMP/simulator.log"
+            exit "$status"
+          fi
           cd build/simulator/Build/Products/Debug-iphonesimulator
           zip -r "$GITHUB_WORKSPACE/HomeLink-simulator.zip" HomeLink.app
 
       - name: Build an unsigned iPhone package
         run: |
-          set -o pipefail
+          set +e
           xcodebuild \
             -project HomeLink.xcodeproj \
             -scheme HomeLink \
@@ -37,11 +49,24 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build/device \
+            CODE_SIGN_STYLE=Manual \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            DEVELOPMENT_TEAM="" \
+            PROVISIONING_PROFILE_SPECIFIER="" \
+            ONLY_ACTIVE_ARCH=NO \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
-            build | xcbeautify
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            build > "$RUNNER_TEMP/device.log" 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "===== compiler errors ====="
+            grep -E "error:" "$RUNNER_TEMP/device.log" | head -80
+            echo "===== build tail ====="
+            tail -60 "$RUNNER_TEMP/device.log"
+            exit "$status"
+          fi
           mkdir -p Payload
           cp -R build/device/Build/Products/Debug-iphoneos/HomeLink.app Payload/
           zip -r "$GITHUB_WORKSPACE/HomeLink-unsigned.ipa" Payload

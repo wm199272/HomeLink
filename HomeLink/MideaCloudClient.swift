@@ -132,7 +132,7 @@ enum MideaCloudClient {
         }
         let key = String(parts[1])
         let value: PyValue
-        switch parts[2] {
+        switch String(parts[2]) {
         case "bool": value = .bool(on)
         case "digit": value = .int(on ? 1 : 0)
         default: value = .string(on ? "on" : "off")

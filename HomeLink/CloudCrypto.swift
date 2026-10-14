@@ -9,9 +9,10 @@ enum CloudCrypto {
 
     static func sha256(_ text: String) -> String {
         let data = Data(text.utf8)
-        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        data.withUnsafeBytes { buffer in
-            _ = CC_SHA256(buffer.baseAddress, CC_LONG(data.count), &digest)
+        let digest: [UInt8] = data.withUnsafeBytes { buffer in
+            var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+            _ = CC_SHA256(buffer.baseAddress, CC_LONG(data.count), &hash)
+            return hash
         }
         return digest.map { String(format: "%02x", $0) }.joined()
     }
@@ -19,17 +20,18 @@ enum CloudCrypto {
     static func hmacSHA256(_ text: String, key: String) -> String {
         let message = Data(text.utf8)
         let keyData = Data(key.utf8)
-        var digest = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        message.withUnsafeBytes { messageBytes in
+        let digest: [UInt8] = message.withUnsafeBytes { messageBytes in
             keyData.withUnsafeBytes { keyBytes in
+                var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
                 CCHmac(
                     CCHmacAlgorithm(kCCHmacAlgSHA256),
                     keyBytes.baseAddress,
                     keyData.count,
                     messageBytes.baseAddress,
                     message.count,
-                    &digest
+                    &hash
                 )
+                return hash
             }
         }
         return digest.map { String(format: "%02x", $0) }.joined()
@@ -126,13 +128,15 @@ enum CloudCrypto {
     ) throws -> Data {
         let outLength = data.count + kCCBlockSizeAES128
         var output = Data(count: outLength)
-        var moved = 0
-        let status: CCCryptorStatus = output.withUnsafeMutableBytes { outBytes in
+        let status: CCCryptorStatus
+        let moved: Int
+        (status, moved) = output.withUnsafeMutableBytes { outBytes in
             data.withUnsafeBytes { dataBytes in
                 key.withUnsafeBytes { keyBytes in
                     if let iv {
                         return iv.withUnsafeBytes { ivBytes in
-                            CCCrypt(
+                            var localMoved = 0
+                            let result = CCCrypt(
                                 operation,
                                 algorithm,
                                 options,
@@ -143,11 +147,13 @@ enum CloudCrypto {
                                 data.count,
                                 outBytes.baseAddress,
                                 outLength,
-                                &moved
+                                &localMoved
                             )
+                            return (result, localMoved)
                         }
                     }
-                    return CCCrypt(
+                    var localMoved = 0
+                    let result = CCCrypt(
                         operation,
                         algorithm,
                         options,
@@ -158,8 +164,9 @@ enum CloudCrypto {
                         data.count,
                         outBytes.baseAddress,
                         outLength,
-                        &moved
+                        &localMoved
                     )
+                    return (result, localMoved)
                 }
             }
         }

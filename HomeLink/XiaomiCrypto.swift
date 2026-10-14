@@ -5,9 +5,10 @@ import Foundation
 enum XiaomiCrypto {
     static func md5Upper(_ text: String) -> String {
         let data = Data(text.utf8)
-        var digest = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
-        data.withUnsafeBytes { buffer in
-            _ = CC_MD5(buffer.baseAddress, CC_LONG(data.count), &digest)
+        let digest: [UInt8] = data.withUnsafeBytes { buffer in
+            var hash = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
+            _ = CC_MD5(buffer.baseAddress, CC_LONG(data.count), &hash)
+            return hash
         }
         return digest.map { String(format: "%02X", $0) }.joined()
     }
@@ -19,8 +20,8 @@ enum XiaomiCrypto {
     static func nonce(now: Date = Date()) -> String {
         var bytes = Data((0..<8).map { _ in UInt8.random(in: .min ... .max) })
         let millis = Int64((now.timeIntervalSince1970 * 1000).rounded())
-        var minutes = UInt32(millis / 60_000).bigEndian
-        withUnsafeBytes(of: &minutes) { bytes.append(contentsOf: $0) }
+        let minutes = UInt32(millis / 60_000).bigEndian
+        withUnsafeBytes(of: minutes) { bytes.append(contentsOf: $0) }
         return bytes.base64EncodedString()
     }
 
