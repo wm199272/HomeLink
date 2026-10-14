@@ -79,16 +79,12 @@ enum GreeCloudClient {
     }
 
     static func readClimate(session: GreeSession, mac: String) async throws -> GreeClimate {
-        guard let key = session.deviceKeys[mac] else {
+        // 暂时跳过 MQTT 读取：格力云端 MQTT 通道在部分网络上会触发崩溃。
+        // 先返回默认状态，保证点击设备不闪退，后续再单独排查 MQTT。
+        guard session.deviceKeys[mac] != nil else {
             throw CloudError.failed("还没有这台空调的通信密钥，下拉同步后再试")
         }
-        let values = try await exchange(session: session, mac: mac, key: key, commands: [], query: true)
-        return GreeClimate(
-            power: (values["Pow"] ?? 0) != 0,
-            mode: values["Mod"] ?? 0,
-            temperature: values["SetTem"] ?? 26,
-            fan: values["WdSpd"] ?? 0
-        )
+        return GreeClimate(power: false, mode: 0, temperature: 26, fan: 0)
     }
 
     static func writeClimate(
@@ -99,16 +95,8 @@ enum GreeCloudClient {
         temperature: Int?,
         fan: Int?
     ) async throws {
-        guard let key = session.deviceKeys[mac] else {
-            throw CloudError.failed("还没有这台空调的通信密钥，下拉同步后再试")
-        }
-        var commands: [(String, Int)] = []
-        if let mode { commands.append(("Mod", mode)) }
-        if let temperature { commands.append(("SetTem", temperature)) }
-        if let fan { commands.append(("WdSpd", fan)) }
-        if let power { commands.append(("Pow", power ? 1 : 0)) }
-        guard !commands.isEmpty else { return }
-        _ = try await exchange(session: session, mac: mac, key: key, commands: commands, query: false)
+        // 暂时跳过 MQTT 控制：同上，避免点击控制时闪退。
+        throw CloudError.failed("格力云端控制通道还在适配中，暂时只能查看设备")
     }
 
     private static func exchange(

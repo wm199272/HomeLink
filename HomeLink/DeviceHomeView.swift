@@ -4,10 +4,28 @@ import UIKit
 struct DeviceHomeView: View {
     @Environment(AppModel.self) private var model
     @State private var query = ""
+    @State private var selectedPlatform: PlatformKind?
+
+    private var linkedPlatforms: [PlatformKind] {
+        let platforms = Set(model.accounts.map(\.platform))
+        return PlatformKind.allCases.filter { platforms.contains($0) }.sorted { $0.sortOrder < $1.sortOrder }
+    }
+
+    private var visibleHomes: [IoTHome] {
+        guard let platform = selectedPlatform else { return model.homes }
+        return model.homes.filter { $0.platform == platform }
+    }
+
+    private var activeHome: IoTHome? {
+        if let home = model.selectedHome, visibleHomes.contains(where: { $0.id == home.id }) {
+            return home
+        }
+        return visibleHomes.first
+    }
 
     var body: some View {
         Group {
-            if let home = model.selectedHome {
+            if let home = activeHome {
                 deviceList(home)
             } else if model.isRefreshing {
                 ProgressView("正在同步设备")
@@ -20,7 +38,7 @@ struct DeviceHomeView: View {
             }
         }
         .background(Color.paper)
-        .navigationTitle(model.selectedHome?.name ?? "设备")
+        .navigationTitle(selectedPlatform?.title ?? "全部设备")
         .navigationDestination(for: DeviceRoute.self) { route in
             DeviceDetailView(deviceID: route.id)
         }
@@ -28,15 +46,30 @@ struct DeviceHomeView: View {
         .refreshable {
             await model.refresh()
         }
+        .safeAreaInset(edge: .top) {
+            if !linkedPlatforms.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        platformChip(nil, title: "全部", symbol: "square.grid.2x2.fill")
+                        ForEach(linkedPlatforms) { platform in
+                            platformChip(platform, title: platform.title, symbol: platform.symbol)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                }
+                .background(.ultraThinMaterial)
+            }
+        }
         .toolbar {
-            if model.homes.count > 1 {
+            if visibleHomes.count > 1 {
                 ToolbarItem(placement: .topBarLeading) {
                     Menu {
-                        ForEach(model.homes) { home in
+                        ForEach(visibleHomes) { home in
                             Button {
                                 model.selectedHomeID = home.id
                             } label: {
-                                if home.id == model.selectedHome?.id {
+                                if home.id == activeHome?.id {
                                     Label(homeLabel(home), systemImage: "checkmark")
                                 } else {
                                     Text(homeLabel(home))
@@ -76,6 +109,32 @@ struct DeviceHomeView: View {
                 .padding(.bottom, 8)
             }
         }
+    }
+
+    private func platformChip(_ platform: PlatformKind?, title: String, symbol: String) -> some View {
+        let active = selectedPlatform == platform
+        return Button {
+            selectedPlatform = platform
+            if let first = visibleHomes.first { model.selectedHomeID = first.id }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.caption)
+                Text(title)
+                    .font(.subheadline.weight(active ? .semibold : .regular))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .foregroundStyle(active ? Color.paper : Color.moss)
+            .background {
+                if active {
+                    Capsule().fill(Color.moss)
+                } else {
+                    Capsule().fill(Color.moss.opacity(0.1))
+                }
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private func deviceList(_ home: IoTHome) -> some View {
