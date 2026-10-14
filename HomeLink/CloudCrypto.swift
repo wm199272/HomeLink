@@ -1,6 +1,26 @@
-import CommonCrypto
+import CryptoKit
 import Foundation
 import Security
+
+@_silgen_name("CCCrypt")
+private func ccCrypt(
+    _ op: UInt32,
+    _ alg: UInt32,
+    _ options: UInt32,
+    _ key: UnsafeRawPointer?,
+    _ keyLength: Int,
+    _ iv: UnsafeRawPointer?,
+    _ dataIn: UnsafeRawPointer?,
+    _ dataInLength: Int,
+    _ dataOut: UnsafeMutableRawPointer?,
+    _ dataOutAvailable: Int,
+    _ dataOutMoved: UnsafeMutablePointer<Int>?
+) -> Int32
+
+enum CipherDirection {
+    case encrypt
+    case decrypt
+}
 
 enum CloudCrypto {
     static func md5(_ text: String) -> String {
@@ -8,33 +28,12 @@ enum CloudCrypto {
     }
 
     static func sha256(_ text: String) -> String {
-        let data = Data(text.utf8)
-        let digest: [UInt8] = data.withUnsafeBytes { buffer in
-            var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-            _ = CC_SHA256(buffer.baseAddress, CC_LONG(data.count), &hash)
-            return hash
-        }
-        return digest.map { String(format: "%02x", $0) }.joined()
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     static func hmacSHA256(_ text: String, key: String) -> String {
-        let message = Data(text.utf8)
-        let keyData = Data(key.utf8)
-        let digest: [UInt8] = message.withUnsafeBytes { messageBytes in
-            keyData.withUnsafeBytes { keyBytes in
-                var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-                CCHmac(
-                    CCHmacAlgorithm(kCCHmacAlgSHA256),
-                    keyBytes.baseAddress,
-                    keyData.count,
-                    messageBytes.baseAddress,
-                    message.count,
-                    &hash
-                )
-                return hash
-            }
-        }
-        return digest.map { String(format: "%02x", $0) }.joined()
+        let code = HMAC<SHA256>.authenticationCode(for: Data(text.utf8), using: SymmetricKey(data: Data(key.utf8)))
+        return Data(code).map { String(format: "%02x", $0) }.joined()
     }
 
     static func aesECBDecryptText(hexCipher: String, asciiKey: String) throws -> String {
@@ -44,7 +43,7 @@ enum CloudCrypto {
         }
         let cipher = Data(hex: cleaned)
         guard cipher.count == cleaned.count / 2 else { throw CloudError.invalidResponse }
-        let plain = try aesECB(CCOperation(kCCDecrypt), data: cipher, key: Data(asciiKey.utf8))
+        let plain = try aesECB(.decrypt, data: cipher, key: Data(asciiKey.utf8))
         guard let text = String(data: plain, encoding: .utf8), !text.isEmpty else {
             throw CloudError.invalidResponse
         }
@@ -73,32 +72,18 @@ enum CloudCrypto {
         return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
-    static func aesECB(_ operation: CCOperation, data: Data, key: Data) throws -> Data {
-        guard key.count == kCCKeySizeAES128 || key.count == kCCKeySizeAES192 || key.count == kCCKeySizeAES256 else {
+    static func aesECB(_ operation: CipherDirection, data: Data, key: Data) throws -> Data {
+        guard key.count == 16 || key.count == 24 || key.count == 32 else {
             throw CloudError.failed("加密密钥长度不正确")
         }
-        return try crypt(
-            operation,
-            algorithm: CCAlgorithm(kCCAlgorithmAES),
-            options: CCOptions(kCCOptionPKCS7Padding | kCCOptionECBMode),
-            key: key,
-            iv: nil,
-            data: data
-        )
+        return try crypt(operation, algorithm: 0, options: 0x0001 | 0x0002, key: key, iv: nil, data: data)
     }
 
-    static func desCBC(_ operation: CCOperation, data: Data, key: Data) throws -> Data {
-        guard key.count == kCCKeySizeDES else {
+    static func desCBC(_ operation: CipherDirection, data: Data, key: Data) throws -> Data {
+        guard key.count == 8 else {
             throw CloudError.failed("登录加密失败")
         }
-        return try crypt(
-            operation,
-            algorithm: CCAlgorithm(kCCAlgorithmDES),
-            options: CCOptions(kCCOptionPKCS7Padding),
-            key: key,
-            iv: key,
-            data: data
-        )
+        return try crypt(operation, algorithm: 1, options: 0x0001, key: key, iv: key, data: data)
     }
 
     /// 360 账号登录信封使用的 RSA 公钥（X.509），只用来加密一次性的 DES 密钥。
@@ -119,16 +104,17 @@ enum CloudCrypto {
     }
 
     private static func crypt(
-        _ operation: CCOperation,
-        algorithm: CCAlgorithm,
-        options: CCOptions,
+        _ operation: CipherDirection,
+        algorithm: UInt32,
+        options: UInt32,
         key: Data,
         iv: Data?,
         data: Data
     ) throws -> Data {
-        let outLength = data.count + kCCBlockSizeAES128
+        let outLength = data.count + 16
         var output = Data(count: outLength)
-        let status: CCCryptorStatus
+        let op: UInt32 = operation == .encrypt ? 0 : 1
+        let status: Int32
         let moved: Int
         (status, moved) = output.withUnsafeMutableBytes { outBytes in
             data.withUnsafeBytes { dataBytes in
@@ -136,8 +122,8 @@ enum CloudCrypto {
                     if let iv {
                         return iv.withUnsafeBytes { ivBytes in
                             var localMoved = 0
-                            let result = CCCrypt(
-                                operation,
+                            let result = ccCrypt(
+                                op,
                                 algorithm,
                                 options,
                                 keyBytes.baseAddress,
@@ -153,8 +139,8 @@ enum CloudCrypto {
                         }
                     }
                     var localMoved = 0
-                    let result = CCCrypt(
-                        operation,
+                    let result = ccCrypt(
+                        op,
                         algorithm,
                         options,
                         keyBytes.baseAddress,
@@ -170,7 +156,7 @@ enum CloudCrypto {
                 }
             }
         }
-        guard status == kCCSuccess else {
+        guard status == 0 else {
             throw CloudError.invalidResponse
         }
         return output.prefix(moved)

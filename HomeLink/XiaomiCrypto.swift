@@ -1,16 +1,9 @@
-import CommonCrypto
 import CryptoKit
 import Foundation
 
 enum XiaomiCrypto {
     static func md5Upper(_ text: String) -> String {
-        let data = Data(text.utf8)
-        let digest: [UInt8] = data.withUnsafeBytes { buffer in
-            var hash = [UInt8](repeating: 0, count: Int(CC_MD5_DIGEST_LENGTH))
-            _ = CC_MD5(buffer.baseAddress, CC_LONG(data.count), &hash)
-            return hash
-        }
-        return digest.map { String(format: "%02X", $0) }.joined()
+        Insecure.MD5.hash(data: Data(text.utf8)).map { String(format: "%02X", $0) }.joined()
     }
 
     static func md5Lower(_ text: String) -> String {

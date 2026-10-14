@@ -33,10 +33,18 @@ jobs:
           status=$?
           cp "$RUNNER_TEMP/simulator.log" "$GITHUB_WORKSPACE/simulator.log" || true
           if [ "$status" -ne 0 ]; then
+            awk 'length($0) < 300 && /error:/' "$RUNNER_TEMP/simulator.log" | head -40 > "$RUNNER_TEMP/errors.txt" || true
+            if [ ! -s "$RUNNER_TEMP/errors.txt" ]; then
+              awk 'length($0) < 220' "$RUNNER_TEMP/simulator.log" | tail -30 > "$RUNNER_TEMP/errors.txt"
+            fi
             echo "===== compiler errors ====="
-            grep -n -E "error:|\.swift:[0-9]+" "$RUNNER_TEMP/simulator.log" | head -120
-            echo "===== build tail ====="
-            tail -80 "$RUNNER_TEMP/simulator.log"
+            cat "$RUNNER_TEMP/errors.txt"
+            {
+              echo "## 模拟器编译失败"
+              echo '```'
+              cat "$RUNNER_TEMP/errors.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
           cd build/simulator/Build/Products/Debug-iphonesimulator
@@ -67,10 +75,18 @@ jobs:
           status=$?
           cp "$RUNNER_TEMP/device.log" "$GITHUB_WORKSPACE/device.log" || true
           if [ "$status" -ne 0 ]; then
+            awk 'length($0) < 300 && /error:/' "$RUNNER_TEMP/device.log" | head -40 > "$RUNNER_TEMP/errors.txt" || true
+            if [ ! -s "$RUNNER_TEMP/errors.txt" ]; then
+              awk 'length($0) < 220' "$RUNNER_TEMP/device.log" | tail -30 > "$RUNNER_TEMP/errors.txt"
+            fi
             echo "===== compiler errors ====="
-            grep -n -E "error:|\.swift:[0-9]+" "$RUNNER_TEMP/device.log" | head -120
-            echo "===== build tail ====="
-            tail -80 "$RUNNER_TEMP/device.log"
+            cat "$RUNNER_TEMP/errors.txt"
+            {
+              echo "## 真机打包失败"
+              echo '```'
+              cat "$RUNNER_TEMP/errors.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
           mkdir -p Payload

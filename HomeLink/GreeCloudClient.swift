@@ -334,7 +334,7 @@ enum GreeCloudClient {
         for (key, value) in payload { body[key] = value }
         let json = try JSONSerialization.data(withJSONObject: body)
         guard let text = String(data: json, encoding: .utf8) else { throw CloudError.invalidResponse }
-        let encrypted = try CloudCrypto.aesECB(CCOperation(kCCEncrypt), data: Data(text.utf8), key: aesKey)
+        let encrypted = try CloudCrypto.aesECB(.encrypt, data: Data(text.utf8), key: aesKey)
         var request = URLRequest(url: URL(string: host + path)!)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
@@ -353,7 +353,7 @@ enum GreeCloudClient {
             if envelope["r"] != nil { return envelope }
             throw CloudError.invalidResponse
         }
-        let plain = try CloudCrypto.aesECB(CCOperation(kCCDecrypt), data: Data(base64Encoded: enRes) ?? Data(), key: aesKey)
+        let plain = try CloudCrypto.aesECB(.decrypt, data: Data(base64Encoded: enRes) ?? Data(), key: aesKey)
         guard let object = try JSONSerialization.jsonObject(with: plain) as? [String: Any] else {
             throw CloudError.invalidResponse
         }
@@ -362,14 +362,14 @@ enum GreeCloudClient {
 
     private static func encrypt(_ json: String, key: String) throws -> String {
         let keyData = Data(key.utf8)
-        let encrypted = try CloudCrypto.aesECB(CCOperation(kCCEncrypt), data: Data(json.utf8), key: keyData)
+        let encrypted = try CloudCrypto.aesECB(.encrypt, data: Data(json.utf8), key: keyData)
         return encrypted.base64EncodedString()
     }
 
     private static func decrypt(_ pack: String, key: String, tag: String?) throws -> String {
         let keyData = Data(key.utf8)
         if let data = Data(base64Encoded: pack),
-           let plain = try? CloudCrypto.aesECB(CCOperation(kCCDecrypt), data: data, key: keyData),
+           let plain = try? CloudCrypto.aesECB(.decrypt, data: data, key: keyData),
            let text = String(data: plain, encoding: .utf8),
            let end = text.lastIndex(of: "}") {
             return String(text[...end])

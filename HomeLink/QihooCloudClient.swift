@@ -266,7 +266,7 @@ enum QihooCloudClient {
               let cipher = Data(base64Encoded: ret) else {
             throw CloudError.invalidResponse
         }
-        let plain = try CloudCrypto.desCBC(CCOperation(kCCDecrypt), data: cipher, key: Data(env.desKey.utf8))
+        let plain = try CloudCrypto.desCBC(.decrypt, data: cipher, key: Data(env.desKey.utf8))
         guard let decoded = try JSONSerialization.jsonObject(with: plain) as? [String: Any] else {
             throw CloudError.invalidResponse
         }
@@ -277,7 +277,7 @@ enum QihooCloudClient {
         let query = params.map { "\($0.key)=\(CloudCrypto.uriEncode($0.value))" }.joined(separator: "&")
         let keyString = CloudCrypto.randomASCII(106) + CloudCrypto.randomASCII(8)
         let desKey = String(keyString.suffix(8))
-        let parad = try CloudCrypto.desCBC(CCOperation(kCCEncrypt), data: Data(query.utf8), key: Data(desKey.utf8)).base64EncodedString()
+        let parad = try CloudCrypto.desCBC(.encrypt, data: Data(query.utf8), key: Data(desKey.utf8)).base64EncodedString()
         let wrapped = try CloudCrypto.rsaPKCS1Encrypt(Data(keyString.utf8)).base64EncodedString()
         return (parad, desKey, wrapped)
     }
