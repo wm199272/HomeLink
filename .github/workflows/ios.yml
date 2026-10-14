@@ -28,6 +28,8 @@ jobs:
             ARCHS=arm64 \
             SWIFT_INSTALL_OBJC_HEADER=NO \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
+            SWIFT_EXPERIMENTAL_FEATURE_DEBUG_DESCRIPTION_MACRO=NO \
+            SWIFT_EMIT_LOC_STRINGS=NO \
             SWIFT_STRICT_CONCURRENCY=minimal \
             build > "$RUNNER_TEMP/simulator.log" 2>&1
           status=$?
@@ -70,6 +72,8 @@ jobs:
             ARCHS=arm64 \
             SWIFT_INSTALL_OBJC_HEADER=NO \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
+            SWIFT_EXPERIMENTAL_FEATURE_DEBUG_DESCRIPTION_MACRO=NO \
+            SWIFT_EMIT_LOC_STRINGS=NO \
             SWIFT_STRICT_CONCURRENCY=minimal \
             build > "$RUNNER_TEMP/device.log" 2>&1
           status=$?
