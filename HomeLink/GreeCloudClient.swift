@@ -72,22 +72,9 @@ enum GreeCloudClient {
             for pair in built.keys { keys[pair.key] = pair.value }
             homes.append(built.home)
         }
-        let powers = await readPowers(session: session, keys: keys)
-        homes = homes.map { home in
-            var copy = home
-            copy.rooms = home.rooms.map { room in
-                var next = room
-                next.devices = room.devices.map { device in
-                    var item = device
-                    if let on = powers[device.did] {
-                        item.power = on ? .on : .off
-                    }
-                    return item
-                }
-                return next
-            }
-            return copy
-        }
+        // 暂时跳过 MQTT 读取开关状态：格力云端 MQTT 通道在部分网络上会触发崩溃，
+        // 先用 nil 开关状态保证关联和浏览不闪退，后续再单独排查 MQTT。
+        _ = keys
         return (homes, keys)
     }
 
