@@ -24,16 +24,19 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
-            ONLY_ACTIVE_ARCH=NO \
+            ONLY_ACTIVE_ARCH=YES \
+            ARCHS=arm64 \
+            SWIFT_INSTALL_OBJC_HEADER=NO \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
             SWIFT_STRICT_CONCURRENCY=minimal \
             build > "$RUNNER_TEMP/simulator.log" 2>&1
           status=$?
+          cp "$RUNNER_TEMP/simulator.log" "$GITHUB_WORKSPACE/simulator.log" || true
           if [ "$status" -ne 0 ]; then
             echo "===== compiler errors ====="
-            grep -E "error:" "$RUNNER_TEMP/simulator.log" | head -80
+            grep -n -E "error:|\.swift:[0-9]+" "$RUNNER_TEMP/simulator.log" | head -120
             echo "===== build tail ====="
-            tail -60 "$RUNNER_TEMP/simulator.log"
+            tail -80 "$RUNNER_TEMP/simulator.log"
             exit "$status"
           fi
           cd build/simulator/Build/Products/Debug-iphonesimulator
@@ -55,21 +58,33 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="" \
             PROVISIONING_PROFILE_SPECIFIER="" \
-            ONLY_ACTIVE_ARCH=NO \
+            ONLY_ACTIVE_ARCH=YES \
+            ARCHS=arm64 \
+            SWIFT_INSTALL_OBJC_HEADER=NO \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
             SWIFT_STRICT_CONCURRENCY=minimal \
             build > "$RUNNER_TEMP/device.log" 2>&1
           status=$?
+          cp "$RUNNER_TEMP/device.log" "$GITHUB_WORKSPACE/device.log" || true
           if [ "$status" -ne 0 ]; then
             echo "===== compiler errors ====="
-            grep -E "error:" "$RUNNER_TEMP/device.log" | head -80
+            grep -n -E "error:|\.swift:[0-9]+" "$RUNNER_TEMP/device.log" | head -120
             echo "===== build tail ====="
-            tail -60 "$RUNNER_TEMP/device.log"
+            tail -80 "$RUNNER_TEMP/device.log"
             exit "$status"
           fi
           mkdir -p Payload
           cp -R build/device/Build/Products/Debug-iphoneos/HomeLink.app Payload/
           zip -r "$GITHUB_WORKSPACE/HomeLink-unsigned.ipa" Payload
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-logs
+          path: |
+            simulator.log
+            device.log
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:
