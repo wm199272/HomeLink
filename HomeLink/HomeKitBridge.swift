@@ -188,27 +188,29 @@ final class HomeKitBridge: NSObject, HMHomeManagerDelegate {
     }
 
     private func category(of accessory: HMAccessory) -> DeviceCategory {
-        switch accessory.category.categoryType {
+        let type = accessory.category.categoryType
+        if #available(iOS 18.0, *), type == HMAccessoryCategoryTypeSpeaker {
+            return .speaker
+        }
+        switch type {
         case HMAccessoryCategoryTypeLightbulb:
-            .light
+            return .light
         case HMAccessoryCategoryTypeOutlet, HMAccessoryCategoryTypeSwitch:
-            .outlet
+            return .outlet
         case HMAccessoryCategoryTypeFan:
-            .fan
+            return .fan
         case HMAccessoryCategoryTypeAirConditioner, HMAccessoryCategoryTypeThermostat, HMAccessoryCategoryTypeAirHeater:
-            .airConditioner
+            return .airConditioner
         case HMAccessoryCategoryTypeAirPurifier:
-            .purifier
+            return .purifier
         case HMAccessoryCategoryTypeWindowCovering, HMAccessoryCategoryTypeWindow:
-            .curtain
+            return .curtain
         case HMAccessoryCategoryTypeDoorLock:
-            .lock
+            return .lock
         case HMAccessoryCategoryTypeSensor:
-            .sensor
-        case HMAccessoryCategoryTypeSpeaker:
-            .speaker
+            return .sensor
         default:
-            .other
+            return .other
         }
     }
 
