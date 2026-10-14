@@ -170,13 +170,17 @@ enum GreeCloudClient {
 
     private static func readPowers(session: GreeSession, keys: [String: String]) async -> [String: Bool] {
         guard !keys.isEmpty, let uid = Int(session.userId) else { return [:] }
-        let mqtt = MiniMQTT(host: session.mqttHost, port: 1984)
-        defer { mqtt.close() }
         do {
-            try await mqtt.connect(clientID: "app_\(CloudCrypto.randomHex(bytes: 8))", username: session.userId, password: session.token)
+            return try await readPowersBody(session: session, keys: keys, uid: uid)
         } catch {
             return [:]
         }
+    }
+
+    private static func readPowersBody(session: GreeSession, keys: [String: String], uid: Int) async throws -> [String: Bool] {
+        let mqtt = MiniMQTT(host: session.mqttHost, port: 1984)
+        defer { mqtt.close() }
+        try await mqtt.connect(clientID: "app_\(CloudCrypto.randomHex(bytes: 8))", username: session.userId, password: session.token)
         var pending = Set(keys.keys)
         for mac in keys.keys {
             let parent = parentMAC(mac)
@@ -335,7 +339,8 @@ enum GreeCloudClient {
         let json = try JSONSerialization.data(withJSONObject: body)
         guard let text = String(data: json, encoding: .utf8) else { throw CloudError.invalidResponse }
         let encrypted = try CloudCrypto.aesECB(.encrypt, data: Data(text.utf8), key: aesKey)
-        var request = URLRequest(url: URL(string: host + path)!)
+        guard let url = URL(string: host + path) else { throw CloudError.invalidResponse }
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
