@@ -469,12 +469,15 @@ enum JSONScalar: Codable, Hashable, Sendable {
 
     var displayText: String {
         switch self {
-        case let .bool(value): value ? "开" : "关"
-        case let .int(value): String(value)
+        case let .bool(value):
+            return value ? "开" : "关"
+        case let .int(value):
+            return String(value)
         case let .double(value):
             if value.rounded() == value { return String(Int(value)) }
             return String(format: "%.1f", value)
-        case let .string(value): value
+        case let .string(value):
+            return value
         }
     }
 
