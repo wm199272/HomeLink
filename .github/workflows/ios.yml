@@ -1,6 +1,8 @@
 name: Build iOS
 
-on:
+"on":
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -35,31 +37,12 @@ jobs:
           status=$?
           cp "$RUNNER_TEMP/simulator.log" "$GITHUB_WORKSPACE/simulator.log" || true
           if [ "$status" -ne 0 ]; then
-            python3 - "$RUNNER_TEMP/simulator.log" "$RUNNER_TEMP/errors.txt" <<'PY'
-import sys
-text = open(sys.argv[1], errors="replace").read().splitlines()
-kept = []
-for line in text:
-    low = line.lower()
-    if "error:" in low or "fatal error" in low or ".swift:" in line:
-        if "swiftcompile normal" in low and "error:" not in low:
-            continue
-        kept.append(line[:500])
-if not kept:
-    kept = [line[:500] for line in text if "failed" in line.lower()][-20:]
-open(sys.argv[2], "w", encoding="utf-8").write("\n".join(kept[:60]))
-PY
+            grep -n -E "error:|fatal error" "$RUNNER_TEMP/simulator.log" | cut -c1-500 | head -60 > "$RUNNER_TEMP/errors.txt" || true
+            if [ ! -s "$RUNNER_TEMP/errors.txt" ]; then
+              grep -n -E "BUILD FAILED|SwiftCompile failed|unknown experimental" "$RUNNER_TEMP/simulator.log" | cut -c1-500 | head -40 > "$RUNNER_TEMP/errors.txt" || true
+            fi
             echo "===== compiler errors ====="
             cat "$RUNNER_TEMP/errors.txt"
-            while IFS= read -r line; do
-              [ -n "$line" ] && echo "::error::$line"
-            done < "$RUNNER_TEMP/errors.txt"
-            {
-              echo "## 模拟器编译失败"
-              echo '```'
-              cat "$RUNNER_TEMP/errors.txt"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
           cd build/simulator/Build/Products/Debug-iphonesimulator
@@ -92,31 +75,12 @@ PY
           status=$?
           cp "$RUNNER_TEMP/device.log" "$GITHUB_WORKSPACE/device.log" || true
           if [ "$status" -ne 0 ]; then
-            python3 - "$RUNNER_TEMP/device.log" "$RUNNER_TEMP/errors.txt" <<'PY'
-import sys
-text = open(sys.argv[1], errors="replace").read().splitlines()
-kept = []
-for line in text:
-    low = line.lower()
-    if "error:" in low or "fatal error" in low or ".swift:" in line:
-        if "swiftcompile normal" in low and "error:" not in low:
-            continue
-        kept.append(line[:500])
-if not kept:
-    kept = [line[:500] for line in text if "failed" in line.lower()][-20:]
-open(sys.argv[2], "w", encoding="utf-8").write("\n".join(kept[:60]))
-PY
+            grep -n -E "error:|fatal error" "$RUNNER_TEMP/device.log" | cut -c1-500 | head -60 > "$RUNNER_TEMP/errors.txt" || true
+            if [ ! -s "$RUNNER_TEMP/errors.txt" ]; then
+              grep -n -E "BUILD FAILED|SwiftCompile failed|unknown experimental" "$RUNNER_TEMP/device.log" | cut -c1-500 | head -40 > "$RUNNER_TEMP/errors.txt" || true
+            fi
             echo "===== compiler errors ====="
             cat "$RUNNER_TEMP/errors.txt"
-            while IFS= read -r line; do
-              [ -n "$line" ] && echo "::error::$line"
-            done < "$RUNNER_TEMP/errors.txt"
-            {
-              echo "## 真机打包失败"
-              echo '```'
-              cat "$RUNNER_TEMP/errors.txt"
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
             exit "$status"
           fi
           mkdir -p Payload
