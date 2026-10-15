@@ -104,9 +104,11 @@ private struct XiaomiWebView: UIViewRepresentable {
                     self.onCookies(cookies)
                     guard !self.notified else { return }
                     let hasToken = cookies.contains { $0.name == "serviceToken" && !$0.value.isEmpty }
+                    dlog("网页加载完成 url=\(current) cookie=[\(cookieNameList(cookies))] serviceToken=\(hasToken)")
                     // 走到 sts 说明网页侧已经在换米家的服务凭证了，长轮询那边马上就有结果。
                     if hasToken || current.contains("/sts") {
                         self.notified = true
+                        dlog("网页侧已确认，通知外部重新检查")
                         self.onConfirmed()
                     }
                 }

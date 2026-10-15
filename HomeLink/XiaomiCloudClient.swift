@@ -108,9 +108,11 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
             throw XiaomiError.failed("没有拿到登录二维码")
         }
         longPollURL = lpURL
-        qrDeadline = Date().addingTimeInterval(Self.qrWindow(from: jsonDouble(json["timeout"])))
+        let window = Self.qrWindow(from: jsonDouble(json["timeout"]))
+        qrDeadline = Date().addingTimeInterval(window)
         let image = try await download(absoluteAccountURL(qr))
         let loginURL = (json["loginUrl"] as? String).flatMap(URL.init(string:))
+        dlog("QR 申请成功：timeout=\(jsonDouble(json["timeout"]).map { String($0) } ?? "nil") 有效=\(Int(window))s lp=\(lpURL.host ?? "?") loginUrl=\(loginURL != nil) cookie=[\(cookieNames())]")
         return QRTicket(image: image, loginURL: loginURL, deadline: qrDeadline)
     }
 
@@ -153,8 +155,15 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
             throw XiaomiError.failed("二维码还没有准备好")
         }
         lastPollActivity = Date()
+        var polls = 0
+        var emptyPolls = 0
+        dlog("开始长轮询：剩余 \(Int(qrDeadline.timeIntervalSinceNow))s")
         while Date() < qrDeadline {
-            if Task.isCancelled { throw CancellationError() }
+            if Task.isCancelled {
+                dlog("长轮询被取消（任务取消）")
+                throw CancellationError()
+            }
+            polls += 1
             var request = URLRequest(url: url)
             request.timeoutInterval = 25
             request.setValue(agent, forHTTPHeaderField: "User-Agent")
@@ -163,30 +172,43 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
                 lastPollActivity = Date()
                 if http.statusCode == 200, let json = try? parse(data) {
                     // 服务器在用户确认后才会回 ssecurity / location，其余时候是空响应。
-                    let hasResult = jsonString(json["location"]) != nil || jsonString(json["ssecurity"]) != nil
+                    let location = jsonString(json["location"])
+                    let hasResult = location != nil || jsonString(json["ssecurity"]) != nil
                     if hasResult {
+                        dlog("长轮询第 \(polls) 次拿到结果：ssecurity=\(jsonString(json["ssecurity"]) != nil) location=\(location != nil)")
                         absorb(json)
-                        if let location = jsonString(json["location"]) {
+                        if let location {
                             try await exchange(location: location)
                         }
-                        if let session = currentSession() { return session }
+                        if let session = currentSession() {
+                            dlog("会话已完整，登录成功 userId=\(session.userId)")
+                            return session
+                        }
+                        dlog("长轮询有结果但会话不完整，缺少：\(sessionMissing()) cookie=[\(cookieNames())]")
                         throw XiaomiError.failed("扫码成功，但没有拿到米家会话，请重新关联")
                     }
+                }
+                emptyPolls += 1
+                // 空响应很频繁，隔几次记一条就够，别把日志刷满。
+                if emptyPolls % 5 == 1 {
+                    dlog("长轮询第 \(polls) 次：未确认（status=\(http.statusCode)）")
                 }
                 // 还没确认，休息一下再问，别贴着服务器打转。
                 try await Task.sleep(nanoseconds: 400_000_000)
             } catch is CancellationError {
+                dlog("长轮询被取消")
                 throw CancellationError()
             } catch let error as URLError {
                 // 去米家扫码、去浏览器确认都会让 App 被系统挂起，在飞的请求会被掐断，
                 // 报 .cancelled / .timedOut / .networkConnectionLost 都是正常现象。
                 // 只有「轮询任务本身被取消」才该停，否则一律当作暂时故障继续等。
                 if Task.isCancelled { throw CancellationError() }
-                _ = error
+                dlog("长轮询第 \(polls) 次遇到网络错误 \(error.code.rawValue)，继续等")
                 lastPollActivity = Date()
                 try await Task.sleep(nanoseconds: 500_000_000)
             }
         }
+        dlog("长轮询期限已到（共 \(polls) 次），判定二维码过期")
         throw XiaomiError.qrExpired
     }
 
@@ -505,8 +527,10 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
 
     private func exchange(location: String) async throws {
+        let host = URL(string: absoluteAccountURL(location))?.host ?? "?"
         if cookie("serviceToken")?.isEmpty ?? true {
-            _ = try? await getRaw(absoluteAccountURL(location), follow: true)
+            let status = (try? await getRaw(absoluteAccountURL(location), follow: true))?.1.statusCode ?? -1
+            dlog("换凭证 GET \(host) status=\(status) cookie=[\(cookieNames())]")
         }
         var token = cookie("serviceToken") ?? ""
         var waited = 0.0
@@ -518,12 +542,14 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
             token = cookie("serviceToken") ?? ""
         }
         guard !token.isEmpty else {
+            dlog("换凭证失败：没有 serviceToken，迟迟未见网页 cookie 进来 cookie=[\(cookieNames())]")
             throw XiaomiError.failed("没有拿到米家服务凭证。请用「在 App 内打开确认页并登录」，或改用账号密码登录")
         }
         serviceToken = token
         if userId == nil {
             userId = cookie("userId")
         }
+        dlog("换凭证成功：serviceToken 已就绪，userId=\(userId ?? "nil")")
     }
 
     /// 把 WKWebView 自己 cookie 库里的东西搬进来。
@@ -545,6 +571,21 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         if serviceToken == nil, let token = cookie("serviceToken"), !token.isEmpty {
             serviceToken = token
         }
+        dlog("吸收网页 cookie：[\(cookieNameList(list))] 合并后=[\(cookieNames())] 缺：\(sessionMissing())")
+    }
+
+    /// 还缺哪些凭证，用来快速判断卡在哪一步。
+    private func sessionMissing() -> String {
+        var missing: [String] = []
+        if ssecurity == nil { missing.append("ssecurity") }
+        if userId == nil { missing.append("userId") }
+        if serviceToken == nil { missing.append("serviceToken") }
+        return missing.isEmpty ? "无" : missing.joined(separator: ",")
+    }
+
+    /// 当前 cookie 库里有哪些名字（只记名字，不记值，避免泄露凭证）。
+    private func cookieNames() -> String {
+        cookieNameList(cookies.cookies ?? [])
     }
 
     private func absorb(_ json: [String: Any]) {
@@ -557,6 +598,7 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         if let cUser = json["cUserId"] as? String, !cUser.isEmpty {
             cUserId = cUser
         }
+        dlog("解析登录结果：ssecurity=\(ssecurity != nil) userId=\(userId ?? "nil") cUserId=\(cUserId ?? "nil")")
     }
 
     private func currentSession() -> XiaomiSession? {

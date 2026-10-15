@@ -37,6 +37,7 @@ final class XiaomiLinkModel {
 
     func appear() {
         guard mode == .qr, !completed else { return }
+        dlog("--- 进入关联页（已有二维码=\(qrImage != nil) isPolling=\(isPolling) 还有地址=\(client.hasPendingQR)）---")
         // 已经有二维码并还在有效期内，就别重新生成（从 Safari 返回时会再次触发 onAppear）。
         if qrImage != nil {
             if isPolling || isBusy { return }
@@ -67,6 +68,7 @@ final class XiaomiLinkModel {
         let away = backgroundedAt.map { Date().timeIntervalSince($0) } ?? 0
         backgroundedAt = nil
         client.extendQRDeadline(by: away)
+        dlog("回到前台：离开 \(Int(away))s，已从期限里补回；isPolling=\(isPolling) isBusy=\(isBusy) 上次轮询响应 \(Int(Date().timeIntervalSince(client.lastPollActivity)))s 前")
         guard !isBusy else { return }
         // 回前台一律立刻重新轮询：挂起前那个在飞的请求已经被系统作废，
         // 指望它自己醒过来是等不到的（这就是「切回来没有任何反应」的原因）。
@@ -97,6 +99,7 @@ final class XiaomiLinkModel {
         client.absorbCookies(list)
         // 万一凭证已经齐了（比如长轮询结果早就到了），不用再等，直接完成关联。
         if !completed, let session = client.readySession {
+            dlog("网页 cookie 补齐了全部凭证，直接完成关联")
             finish(session)
         }
     }
@@ -141,6 +144,7 @@ final class XiaomiLinkModel {
 
     /// 换一张全新的二维码（会作废当前 long polling 地址）。
     func startQR() {
+        dlog("开始新的二维码（会作废现有 long polling）")
         error = nil
         notice = nil
         autoRefreshCount = 0
@@ -155,6 +159,7 @@ final class XiaomiLinkModel {
 
     /// 沿用当前二维码和 long polling 地址继续等，不重新生成。
     private func resumeQR() {
+        dlog("沿用当前二维码继续轮询（不重新生成）")
         let previous = pollTask
         previous?.cancel()
         pollTask = Task {
@@ -207,6 +212,7 @@ final class XiaomiLinkModel {
     /// - Parameter reusingCode: 为 true 表示沿用当前二维码和它的 long polling 地址，只接着等结果，
     ///   不要重新向小米申请二维码，否则会把用户刚在浏览器里确认的会话作废。
     private func runQR(reusingCode: Bool) async {
+        dlog("runQR 开始（复用现有二维码=\(reusingCode)）")
         if !reusingCode {
             isBusy = true
             error = nil
@@ -238,9 +244,11 @@ final class XiaomiLinkModel {
             isPolling = false
             stopTicker()
             isBusy = false
+            dlog("轮询任务结束（被取消）")
         } catch XiaomiError.qrExpired {
             isPolling = false
             stopTicker()
+            dlog("二维码过期，自动换新（第 \(autoRefreshCount + 1) 次）")
             guard !Task.isCancelled else { return }
             // 过期不是失败：直接换一张新二维码，别让用户面对一个死掉的页面。
             if autoRefreshCount < 3 {
@@ -256,6 +264,7 @@ final class XiaomiLinkModel {
             isPolling = false
             stopTicker()
             if !Task.isCancelled {
+                dlog("登录失败：\(humanize(error))")
                 self.error = humanize(error)
                 isBusy = false
             }
@@ -283,6 +292,7 @@ final class XiaomiLinkModel {
         completed = true
         showWebLogin = false
         stopTicker()
+        dlog("关联完成 userId=\(session.userId)")
         let label = username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "小米用户 \(session.userId.suffix(4))"
             : maskedAccount(username)
@@ -295,6 +305,9 @@ struct XiaomiLinkView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
     @State private var link = XiaomiLinkModel()
+    @State private var showDiagnostics = false
+    @State private var diagnosticsTick = 0
+    @State private var copiedNotice = false
 
     var body: some View {
         ScrollView {
@@ -346,6 +359,8 @@ struct XiaomiLinkView: View {
                         passwordForm
                     }
                 }
+
+                diagnosticsPanel
             }
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -395,9 +410,60 @@ struct XiaomiLinkView: View {
         }
     }
 
+    /// 诊断面板：登录卡住时把这里的内容复制出来，就能定位卡在哪一步。
+    private var diagnosticsPanel: some View {
+        DisclosureGroup(isExpanded: $showDiagnostics) {
+            VStack(alignment: .leading, spacing: 8) {
+                ScrollView {
+                    Text(diagnosticsText)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 220)
+                HStack(spacing: 10) {
+                    Button("复制全部") {
+                        UIPasteboard.general.string = diagnosticsText
+                        copiedNotice = true
+                    }
+                    .buttonStyle(.bordered)
+                    Button("清空") {
+                        Diagnostics.shared.clear()
+                        diagnosticsTick += 1
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .font(.footnote)
+                if copiedNotice {
+                    Text("已复制，粘贴发给我即可")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.top, 6)
+        } label: {
+            Text("诊断信息（登录卡住时点开，复制给我）")
+                .font(.footnote)
+        }
+        .task(id: showDiagnostics) {
+            guard showDiagnostics else { return }
+            // 面板打开时每秒刷新一次，好看到进度实时滚动。
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { break }
+                diagnosticsTick += 1
+            }
+        }
+    }
+
+    private var diagnosticsText: String {
+        _ = diagnosticsTick
+        let lines = Diagnostics.shared.snapshot()
+        return lines.isEmpty ? "（暂无记录）" : lines.joined(separator: "\n")
+    }
+
     /// 二维码区域下方那行状态文字，让用户知道 App 一直在等，而不是「没反应」。
-    private var statusLine: String {
-        if link.isPolling {
+    private var statusLine: String {        if link.isPolling {
             return "等待确认中（已等 \(link.waitedSeconds) 秒），确认后会立刻完成关联"
         }
         if link.isBusy {
