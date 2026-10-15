@@ -24,20 +24,28 @@ final class XiaomiLinkModel {
     private let client = XiaomiCloudClient()
     private var pollTask: Task<Void, Never>?
     private var backgroundedAt: Date?
+    private var autoRefreshCount = 0
 
     enum Mode { case qr, password }
     enum Phase { case form, captcha, twoFactor }
 
     func appear() {
         guard mode == .qr else { return }
-        // 已经有二维码并且轮询还活着，就别动它（从 Safari 返回时会再次触发 onAppear）。
-        if qrImage != nil, isPolling || client.hasActiveQR { return }
+        // 已经有二维码并还在有效期内，就别重新生成（从 Safari 返回时会再次触发 onAppear）。
+        if qrImage != nil {
+            if isPolling || isBusy { return }
+            if client.hasActiveQR {
+                resumeQR()
+            } else {
+                startQR()
+            }
+            return
+        }
         startQR()
     }
 
     func stop() {
         pollTask?.cancel()
-        pollTask = nil
         isPolling = false
         isBusy = false
     }
@@ -52,9 +60,19 @@ final class XiaomiLinkModel {
         let away = backgroundedAt.map { Date().timeIntervalSince($0) } ?? 0
         backgroundedAt = nil
         client.extendQRDeadline(by: away)
-        guard !isPolling else { return }
-        // 后台期间轮询要么被掐断、要么已经判过期，回到前台就重新挂上。
-        if qrImage != nil || error != nil || notice != nil {
+        // 轮询任务看着还活着，但可能卡在挂起前已经作废的那个请求上，太久没动静就重挂一次。
+        if isPolling {
+            if Date().timeIntervalSince(client.lastPollActivity) > 30 {
+                resumeQR()
+            }
+            return
+        }
+        guard !isBusy else { return }
+        // 关键：去浏览器确认过的那张二维码不能重新生成，否则会把已经确认的会话作废。
+        // 只要还在有效期内，就复用同一个 long polling 地址继续等结果。
+        if qrImage != nil, client.hasActiveQR {
+            resumeQR()
+        } else if qrImage != nil || error != nil || notice != nil || pollTask == nil {
             startQR()
         }
     }
@@ -79,15 +97,28 @@ final class XiaomiLinkModel {
         startQR()
     }
 
+    /// 换一张全新的二维码（会作废当前 long polling 地址）。
     func startQR() {
         error = nil
         notice = nil
+        autoRefreshCount = 0
         let previous = pollTask
         previous?.cancel()
         pollTask = Task {
             _ = await previous?.value
             guard !Task.isCancelled else { return }
-            await runQR()
+            await runQR(reusingCode: false)
+        }
+    }
+
+    /// 沿用当前二维码和 long polling 地址继续等，不重新生成。
+    private func resumeQR() {
+        let previous = pollTask
+        previous?.cancel()
+        pollTask = Task {
+            _ = await previous?.value
+            guard !Task.isCancelled else { return }
+            await runQR(reusingCode: true)
         }
     }
 
@@ -131,15 +162,21 @@ final class XiaomiLinkModel {
         }
     }
 
-    private func runQR(autoRefreshes: Int = 0) async {
-        isBusy = true
-        error = nil
-        phase = .form
+    /// - Parameter reusingCode: 为 true 表示沿用当前二维码和它的 long polling 地址，只接着等结果，
+    ///   不要重新向小米申请二维码，否则会把用户刚在浏览器里确认的会话作废。
+    private func runQR(reusingCode: Bool) async {
+        if !reusingCode {
+            isBusy = true
+            error = nil
+            phase = .form
+        }
         do {
-            let ticket = try await client.beginQRLogin(region: region)
-            if Task.isCancelled { return }
-            qrImage = UIImage(data: ticket.image)
-            loginURL = ticket.loginURL
+            if !reusingCode {
+                let ticket = try await client.beginQRLogin(region: region)
+                if Task.isCancelled { return }
+                qrImage = UIImage(data: ticket.image)
+                loginURL = ticket.loginURL
+            }
             isBusy = false
             isPolling = true
             let session: XiaomiSession
@@ -159,10 +196,12 @@ final class XiaomiLinkModel {
             isPolling = false
             guard !Task.isCancelled else { return }
             // 过期不是失败：直接换一张新二维码，别让用户面对一个死掉的页面。
-            if autoRefreshes < 3 {
+            if autoRefreshCount < 3 {
+                autoRefreshCount += 1
                 notice = "上一张二维码已过期，已经换成新的了，请重新扫描"
-                await runQR(autoRefreshes: autoRefreshes + 1)
+                await runQR(reusingCode: false)
             } else {
+                autoRefreshCount = 0
                 isBusy = false
                 error = "二维码一直过期，请检查网络后点「刷新二维码」重试"
             }
@@ -191,6 +230,7 @@ final class XiaomiLinkModel {
     }
 
     private func finish(_ session: XiaomiSession) {
+        autoRefreshCount = 0
         let label = username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "小米用户 \(session.userId.suffix(4))"
             : maskedAccount(username)
@@ -314,7 +354,7 @@ struct XiaomiLinkView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             if link.qrImage != nil && link.error == nil {
-                Text(link.isPolling ? "等待手机确认，可以切到米家扫码，这里会一直等" : "正在准备二维码")
+                Text(link.isPolling ? "等待确认中，可以切到米家或浏览器操作，这里会一直等" : "正在准备二维码")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -324,7 +364,7 @@ struct XiaomiLinkView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Link("在浏览器中打开确认页", destination: url)
                         .font(.footnote)
-                    Text("浏览器的确认页要求这个浏览器已经登录小米账号，否则会直接提示二维码过期；用米家扫描上面的二维码最稳。")
+                    Text("浏览器里登录/确认成功后，请回到本 App，这里会自动完成关联（确认结果是通过后台长连接回传的，浏览器不会自己跳回来）。")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }

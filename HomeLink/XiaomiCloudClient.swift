@@ -134,42 +134,46 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         qrDeadline = qrDeadline.addingTimeInterval(min(seconds, 1_800))
     }
 
+    /// 最近一次长轮询有回应的时间。回到前台时用它判断轮询是不是已经卡死。
+    private(set) var lastPollActivity = Date.distantPast
+
     func waitForQR() async throws -> XiaomiSession {
         guard let url = longPollURL else {
             throw XiaomiError.failed("二维码还没有准备好")
         }
+        lastPollActivity = Date()
         while Date() < qrDeadline {
-            try Task.checkCancellation()
+            if Task.isCancelled { throw CancellationError() }
             var request = URLRequest(url: url)
             request.timeoutInterval = 25
             request.setValue(agent, forHTTPHeaderField: "User-Agent")
             do {
                 let (data, http) = try await send(request, followRedirects: true)
-                guard http.statusCode == 200, let json = try? parse(data) else {
-                    // 长轮询偶尔会返回空响应或非 200，歇一下再问，别贴着服务器打转。
-                    try await Task.sleep(nanoseconds: 400_000_000)
-                    continue
+                lastPollActivity = Date()
+                if http.statusCode == 200, let json = try? parse(data) {
+                    // 服务器在用户确认后才会回 ssecurity / location，其余时候是空响应。
+                    let hasResult = jsonString(json["location"]) != nil || jsonString(json["ssecurity"]) != nil
+                    if hasResult {
+                        absorb(json)
+                        if let location = jsonString(json["location"]) {
+                            try await exchange(location: location)
+                        }
+                        if let session = currentSession() { return session }
+                        throw XiaomiError.failed("扫码成功，但没有拿到米家会话，请重新关联")
+                    }
                 }
-                guard jsonString(json["ssecurity"]) != nil else {
-                    try await Task.sleep(nanoseconds: 400_000_000)
-                    continue
-                }
-                absorb(json)
-                if let location = jsonString(json["location"]) {
-                    try await exchange(location: location)
-                }
-                guard let session = currentSession() else {
-                    throw XiaomiError.failed("扫码成功，但没有拿到米家会话")
-                }
-                return session
+                // 还没确认，休息一下再问，别贴着服务器打转。
+                try await Task.sleep(nanoseconds: 400_000_000)
             } catch is CancellationError {
                 throw CancellationError()
             } catch let error as URLError {
-                // 去米家扫码、去浏览器确认都会让 App 被挂起，连接被系统掐断属于正常现象；
-                // 只要还在有效期内就继续轮询，不要把用户直接赶回「二维码已过期」。
-                if error.code == .cancelled { throw CancellationError() }
+                // 去米家扫码、去浏览器确认都会让 App 被系统挂起，在飞的请求会被掐断，
+                // 报 .cancelled / .timedOut / .networkConnectionLost 都是正常现象。
+                // 只有「轮询任务本身被取消」才该停，否则一律当作暂时故障继续等。
+                if Task.isCancelled { throw CancellationError() }
+                _ = error
+                lastPollActivity = Date()
                 try await Task.sleep(nanoseconds: 500_000_000)
-                continue
             }
         }
         throw XiaomiError.qrExpired
