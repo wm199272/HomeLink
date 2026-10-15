@@ -328,17 +328,17 @@ struct MiotControlView: View {
             ("烘干剩余", vacuum.dryLeft),
             ("集尘剩余", vacuum.dustLeft),
         ]
-        let lefts: [(String, MiotPropertyRef)] = candidates.compactMap { name, ref in
-            guard let ref, values[ref.id] != nil else { return nil }
-            return (name, ref)
+        let lefts: [(String, MiotPropertyRef)] = candidates.compactMap { pair in
+            guard let ref = pair.1, values[ref.id] != nil else { return nil }
+            return (pair.0, ref)
         }
-        let station = vacuum.stationStatus.flatMap { values[$0.id] }
+        let station = stationText(vacuum)
 
         if !actions.isEmpty || !lefts.isEmpty || station != nil {
             SectionCard("基站", symbol: "house.fill") {
                 VStack(alignment: .leading, spacing: 14) {
-                    if let station, case let .string(text) = station, !text.isEmpty {
-                        Text(text)
+                    if let station {
+                        Text(station)
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -924,6 +924,16 @@ struct MiotControlView: View {
             return VacuumNaming.optionTitle(option.description, property: ref.name)
         }
         return value.displayText
+    }
+
+    /// 基站那一行状态文字。有的固件上报的是规规矩矩的一句话，有的是整段 JSON，
+    /// 后者直接丢掉，免得界面上出现一串大括号。
+    private func stationText(_ vacuum: VacuumRoles) -> String? {
+        guard let raw = current(vacuum.stationStatus), case let .string(text) = raw else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed.count > 30 { return nil }
+        if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") { return nil }
+        return trimmed
     }
 
     private func sendVacuumAction(_ ref: MiotActionRef?, _ success: String) {
