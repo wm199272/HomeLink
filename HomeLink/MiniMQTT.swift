@@ -119,7 +119,7 @@ final class MiniMQTT: @unchecked Sendable {
         while Date() < deadline {
             if let packet = popPacket() { return packet }
             try Task.checkCancellation()
-            try await Task.sleep(nanoseconds: 50_000_000)
+            try await Task.sleep(nanoseconds: 30_000_000)
             if let packet = popPacket() { return packet }
             lock.lock()
             let error = failed
@@ -131,62 +131,40 @@ final class MiniMQTT: @unchecked Sendable {
         return popPacket()
     }
 
-    private func wait(until deadline: Date) async throws {
-        // 改成轮询，不再用 CheckedContinuation，避免续体误用崩溃
-        while Date() < deadline {
-            try Task.checkCancellation()
-            try await Task.sleep(nanoseconds: 30_000_000)
-            lock.lock()
-            let ready = packetReadyLocked() || failed != nil || ended
-            lock.unlock()
-            if ready { return }
-        }
-    }
-
     private func popPacket() -> Data? {
         lock.lock()
         defer { lock.unlock() }
         return popPacketLocked()
     }
 
-    private func packetReadyLocked() -> Bool {
-        guard buffer.count >= 2 else { return false }
-        var index = 1
+    /// 读取「剩余长度」字段。注意 `Data` 的 `startIndex` 不一定是 0，
+    /// 每次 `removeFirst` 之后 `startIndex` 都会前移，所以必须用绝对下标 base + offset。
+    private func remainingLengthLocked() -> (headerBytes: Int, bodyLength: Int)? {
+        guard buffer.count >= 2 else { return nil }
+        let base = buffer.startIndex
+        var offset = 1
         var multiplier = 1
         var length = 0
-        while index < buffer.count && index < 6 {
-            let byte = Int(buffer[index])
+        while offset < buffer.count && offset < 6 {
+            let byte = Int(buffer[base + offset])
             length += (byte & 0x7F) * multiplier
-            index += 1
+            offset += 1
             if byte & 0x80 == 0 {
-                return buffer.count >= index + length
+                return (offset, length)
             }
             multiplier *= 128
         }
-        return false
+        return nil
     }
 
     private func popPacketLocked() -> Data? {
-        guard buffer.count >= 2 else { return nil }
-        var index = 1
-        var multiplier = 1
-        var length = 0
-        var complete = false
-        while index < buffer.count && index < 6 {
-            let byte = Int(buffer[index])
-            length += (byte & 0x7F) * multiplier
-            index += 1
-            if byte & 0x80 == 0 {
-                complete = true
-                break
-            }
-            multiplier *= 128
-        }
-        guard complete else { return nil }
-        let total = index + length
+        guard let (headerBytes, bodyLength) = remainingLengthLocked() else { return nil }
+        let total = headerBytes + bodyLength
         guard buffer.count >= total else { return nil }
-        let packet = Data(buffer.prefix(total))
-        buffer.removeFirst(total)
+        let base = buffer.startIndex
+        let packet = Data(Array(buffer[base..<(base + total)]))
+        // 用 dropFirst 重建，既保证 buffer.startIndex 归零，也及时回收已消费的内存。
+        buffer = Data(Array(buffer.dropFirst(total)))
         return packet
     }
 

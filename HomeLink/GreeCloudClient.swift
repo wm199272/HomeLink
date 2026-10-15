@@ -72,9 +72,22 @@ enum GreeCloudClient {
             for pair in built.keys { keys[pair.key] = pair.value }
             homes.append(built.home)
         }
-        // 启动同步时不再走 MQTT 读开关状态：格力云端 MQTT 通道会触发底层崩溃，
-        // 先用 nil 开关状态保证 app 能打开；开关状态在点进设备详情时再单独拉取。
-        _ = keys
+        let powers = await readPowers(session: session, keys: keys)
+        homes = homes.map { home in
+            var copy = home
+            copy.rooms = home.rooms.map { room in
+                var next = room
+                next.devices = room.devices.map { device in
+                    var item = device
+                    if let on = powers[device.did] {
+                        item.power = on ? .on : .off
+                    }
+                    return item
+                }
+                return next
+            }
+            return copy
+        }
         return (homes, keys)
     }
 
