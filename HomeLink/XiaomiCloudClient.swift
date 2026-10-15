@@ -565,29 +565,67 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
 
     private func exchange(location: String) async throws {
-        let host = URL(string: absoluteAccountURL(location))?.host ?? "?"
-        if cookie("serviceToken")?.isEmpty ?? true {
-            let status = (try? await getRaw(absoluteAccountURL(location), follow: true))?.1.statusCode ?? -1
-            dlog("换凭证 GET \(host) status=\(status) cookie=[\(cookieNames())]")
-        }
-        var token = cookie("serviceToken") ?? ""
+        let url = absoluteAccountURL(location)
+        let host = URL(string: url)?.host ?? "?"
+        // 这一趟必须走：换凭证的这次请求才把 serviceToken 和当前 ssecurity 绑在同一会话里。
+        // 原来只要本地已经有同名 cookie 就直接跳过，而那个 cookie 很可能是网页登录留下的、
+        // 属于另一次会话 —— 拿它配这次的 ssecurity 签名，服务端一律回 401。
+        let hadTokenBefore = apiServiceToken() != nil
+        let status = (try? await getRaw(url, follow: true))?.1.statusCode ?? -1
+        dlog("换凭证 GET \(host) status=\(status) 请求前有 token=\(hadTokenBefore) 请求后有 token=\(apiServiceToken() != nil) token 域名=[\(serviceTokenDomains())] cookie=[\(cookieNames())]")
+
+        var token = apiServiceToken() ?? ""
         var waited = 0.0
-        // App 内网页登录时，serviceToken 可能比长轮询拿到的 location 晚一步写进 cookie，
-        // 所以这里多等最多 5 秒，别让用户刚好卡在这个时间差上。
+        // serviceToken 可能比 location 晚一步写进 cookie 存储，多等一会儿。
         while token.isEmpty && waited < 5 {
             try? await Task.sleep(nanoseconds: 500_000_000)
             waited += 0.5
-            token = cookie("serviceToken") ?? ""
+            token = apiServiceToken() ?? ""
         }
         guard !token.isEmpty else {
-            dlog("换凭证失败：没有 serviceToken，迟迟未见网页 cookie 进来 cookie=[\(cookieNames())]")
-            throw XiaomiError.failed("没有拿到米家服务凭证。请用「在 App 内打开确认页并登录」，或改用账号密码登录")
+            dlog("换凭证失败：没有 serviceToken cookie=[\(cookieNames())] token 域名=[\(serviceTokenDomains())]")
+            throw XiaomiError.failed("没有拿到米家服务凭证。请用「打开小米确认页并登录」重新关联一次")
         }
         serviceToken = token
+        // 覆盖本地表，免得后面按名字读到网页那个同名的。
+        jarSet("serviceToken", token)
         if userId == nil {
             userId = cookie("userId")
         }
-        dlog("换凭证成功：serviceToken 已就绪，userId=\(userId ?? "nil")")
+        dlog("换凭证成功：serviceToken 已就绪 token 域名=[\(serviceTokenDomains())] userId=\(userId ?? "nil")")
+    }
+
+    /// 米家 API 该用哪个 `serviceToken`。
+    ///
+    /// 网页登录（`account.xiaomi.com`）和换凭证（`sts.api.io.mi.com`）会各写一个同名的
+    /// `serviceToken`，两者属于不同会话。我们原来按名字存 cookie，谁后写谁赢，于是很可能
+    /// 用网页那个去请求 API —— 配上长轮询的 ssecurity 签名，服务端只会回 401。
+    /// 这里按 API 域名精确查，只有查不到才退回本地表和全局存储。
+    private func apiServiceToken() -> String? {
+        let all = cookies.cookies ?? []
+        if let match = all.last(where: { $0.name == "serviceToken" && Self.isMiDomain($0.domain) }),
+           !match.value.isEmpty {
+            return match.value
+        }
+        if let value = jarGet("serviceToken"), !value.isEmpty { return value }
+        return all.last(where: { $0.name == "serviceToken" })?.value
+    }
+
+    /// 是不是米家 API 那一侧的域名。
+    ///
+    /// 必须用后缀判断：`xiaomi.com` 里正好含着 `mi.com` 这几个字符
+    /// （xiao**mi.com**），写成 `contains("mi.com")` 会把网页那一侧也算进来，
+    /// 等于没筛。
+    private static func isMiDomain(_ domain: String) -> Bool {
+        let lower = domain.lowercased()
+        return lower == "mi.com" || lower.hasSuffix(".mi.com")
+    }
+
+    /// 诊断用：列出各 serviceToken 落在哪个域名，用来判断拿到的是 API 那个还是网页那个。
+    private func serviceTokenDomains() -> String {
+        let items = (cookies.cookies ?? []).filter { $0.name == "serviceToken" }
+        guard !items.isEmpty else { return "无" }
+        return items.map(\.domain).joined(separator: ",")
     }
 
     /// 把 WKWebView 自己 cookie 库里的东西搬进来。
@@ -607,10 +645,9 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         if cUserId == nil, let cUser = cookie("cUserId"), !cUser.isEmpty {
             cUserId = cUser
         }
-        if serviceToken == nil, let token = cookie("serviceToken"), !token.isEmpty {
-            serviceToken = token
-        }
-        dlog("吸收网页 cookie：[\(cookieNameList(list))] 本地表=[\(jarNames())] 系统存储=[\(cookieNames())] 缺：\(sessionMissing())")
+        // 这里故意不设 serviceToken：网页 cookie 里的那个属于网页那次会话，
+        // 必须由 exchange 换来的 API 域名 token 说了算，否则拿它签名就是 401。
+        dlog("吸收网页 cookie：[\(cookieNameList(list))] 本地表=[\(jarNames())] 系统存储=[\(cookieNames())] token 域名=[\(serviceTokenDomains())] 缺：\(sessionMissing())")
     }
 
     /// 还缺哪些凭证，用来快速判断卡在哪一步。
@@ -648,7 +685,8 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
             try? await exchange(location: location)
         }
         if userId == nil, let uid = cookie("userId"), !uid.isEmpty { userId = uid }
-        if serviceToken == nil, let token = cookie("serviceToken"), !token.isEmpty { serviceToken = token }
+        // 这里同样要 API 域名的那个：cookie("serviceToken") 按名字取，可能拿到网页那次会话的。
+        if serviceToken == nil, let token = apiServiceToken(), !token.isEmpty { serviceToken = token }
         guard let session = currentSession() else {
             dlog("用网页 cookie 换会话结果：失败，仍缺 \(sessionMissing())")
             return nil
@@ -994,10 +1032,10 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         request.setValue(cookieHeader(session), forHTTPHeaderField: "Cookie")
         let (data, http) = try await sendWithRetry(request, path: path)
         guard http.statusCode == 200 else {
-            let snippet = Self.bodySnippet(data)
-            xiaomiLog.error("mi home http \(http.statusCode, privacy: .public) \(path, privacy: .public) \(snippet, privacy: .public)")
-            dlog("米家接口非 200：\(path) → \(http.statusCode) 响应=\(snippet)")
-            throw XiaomiError.failed("米家接口暂时不可用（\(http.statusCode) \(path)）")
+            let reason = Self.bodySnippet(data)
+            xiaomiLog.error("mi home http \(http.statusCode, privacy: .public) \(path, privacy: .public) \(reason, privacy: .public)")
+            dlog("米家接口非 200：\(path) → \(http.statusCode) 响应=\(reason) token 域名=[\(serviceTokenDomains())]")
+            throw XiaomiError.failed("米家接口暂时不可用（\(http.statusCode) \(path)）：\(reason)")
         }
         let object: [String: Any]
         do {
@@ -1209,10 +1247,13 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         let hours = seconds / 3600
         let minutes = abs(seconds / 60) % 60
         let zone = String(format: "GMT%+03d:%02d", hours, minutes)
+        // 发送时再确认一次用哪个 serviceToken：网页登录留下的同名 cookie 属于另一次会话，
+        // 拿它配当前 ssecurity 会直接 401，所以 API 域名上有就用 API 域名的。
+        let token = apiServiceToken() ?? session.serviceToken
         return [
             "userId=\(session.userId)",
-            "serviceToken=\(session.serviceToken)",
-            "yetAnotherServiceToken=\(session.serviceToken)",
+            "serviceToken=\(token)",
+            "yetAnotherServiceToken=\(token)",
             "locale=zh_CN",
             "timezone=\(zone)",
             "is_daylight=0",
