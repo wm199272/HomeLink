@@ -99,33 +99,93 @@ enum QihooCloudClient {
         try await commandRequest(session: session, sn: sn, infoType: infoType, data: data)
     }
 
+    private struct DeviceBatch {
+        var rows: [[String: Any]]
+        var shared: Bool
+    }
+
     private static func homes(account: LinkedAccount, session: QihooSession) async throws -> [IoTHome] {
-        var merged: [String: [String: Any]] = [:]
+        var owned: [String: [String: Any]] = [:]
+        var shared: [String: [String: Any]] = [:]
         let filters: [String?] = [nil, "1", "2", "3", "4", "5", "6", "7", "8"]
-        try await withThrowingTaskGroup(of: [[String: Any]].self) { group in
+        try await withThrowingTaskGroup(of: DeviceBatch.self) { group in
             for filter in filters {
                 group.addTask {
-                    try await deviceList(session: session, devType: filter)
+                    DeviceBatch(rows: try await deviceList(session: session, devType: filter), shared: false)
                 }
             }
-            for try await rows in group {
-                for row in rows {
-                    if let sn = jsonString(row["sn"]), !sn.isEmpty {
-                        merged[sn] = row
+            // 分享设备单独探一批候选接口，和普通列表并发跑，不额外增加等待时间。
+            for candidate in shareCandidates {
+                group.addTask {
+                    DeviceBatch(rows: await sharedDeviceList(session: session, candidate: candidate), shared: true)
+                }
+            }
+            for try await batch in group {
+                for row in batch.rows {
+                    guard let sn = jsonString(row["sn"]), !sn.isEmpty else { continue }
+                    if batch.shared {
+                        shared[sn] = row
+                    } else {
+                        owned[sn] = row
                     }
                 }
             }
         }
-        let devices = merged.values.map { device(account: account, row: $0) }
+        // 自己名下的设备优先：同一个 sn 不重复显示。
+        for sn in Array(shared.keys) where owned[sn] != nil {
+            shared.removeValue(forKey: sn)
+        }
+        let ownedDevices = owned.values.map { device(account: account, row: $0, roomName: "全部设备") }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        let sharedDevices = shared.values.map { device(account: account, row: $0, roomName: "分享给我的") }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        var rooms = [IoTRoom(id: "\(account.id.uuidString)|qihoo|all", name: "全部设备", devices: ownedDevices)]
+        if !sharedDevices.isEmpty {
+            rooms.append(IoTRoom(id: "\(account.id.uuidString)|qihoo|shared", name: "分享给我的", devices: sharedDevices))
+        }
         return [IoTHome(
             id: "\(account.id.uuidString)|qihoo|home",
             homeId: "qihoo",
             name: "360 智慧生活",
             platform: .qihoo,
             accountId: account.id,
-            rooms: [IoTRoom(id: "\(account.id.uuidString)|qihoo|all", name: "全部设备", devices: devices)]
+            rooms: rooms
         )]
+    }
+
+    /// 候选的「别人分享给我的设备」接口。
+    ///
+    /// 这些接口没有公开文档，命名是按 360 智慧生活的习惯猜的。命中任何一个就够了；
+    /// 全部失败只是看不到分享设备，不会影响自己名下的设备。
+    /// 参考：分享设备不在 `/common/dev/GetList` 的返回里，所以必须另找入口。
+    private static let shareCandidates: [(path: String, fields: [String: String])] = [
+        ("/common/dev/GetShareList", [:]),
+        ("/common/dev/GetSharedList", [:]),
+        ("/common/share/GetList", [:]),
+        ("/common/dev/GetList", ["shareType": "1"]),
+        ("/common/dev/GetList", ["isShare": "1"]),
+        ("/common/dev/GetList", ["deviceSource": "share"]),
+    ]
+
+    private static func sharedDeviceList(
+        session: QihooSession,
+        candidate: (path: String, fields: [String: String])
+    ) async -> [[String: Any]] {
+        var fields = commonFields()
+        for (key, value) in candidate.fields { fields[key] = value }
+        guard let url = URL(string: base + candidate.path) else { return [] }
+        do {
+            let data = try await form(
+                url: url,
+                cookie: cookie(session, includeSid: true),
+                userAgent: "QihooSuperApp_NoPods/11.1.0 (iPhone; iOS 17.0; Scale/3.00)",
+                fields: fields
+            )
+            try check(data, name: "360 智慧生活")
+            return rows(from: data)
+        } catch {
+            return []
+        }
     }
 
     private static func deviceList(session: QihooSession, devType: String?) async throws -> [[String: Any]] {
@@ -144,11 +204,16 @@ enum QihooCloudClient {
             if case .sessionExpired = error { throw error }
             return []
         }
+        return rows(from: data)
+    }
+
+    /// 从设备列表响应里取出设备行。不同接口/版本返回的形状不一样，挨个兜一遍。
+    private static func rows(from data: [String: Any]) -> [[String: Any]] {
         if let list = data["data"] as? [Any] {
             return list.compactMap { $0 as? [String: Any] }
         }
         let bag = data["data"] as? [String: Any] ?? [:]
-        for key in ["list", "devList", "devices", "cleanDevList"] {
+        for key in ["list", "devList", "devices", "cleanDevList", "shareList", "sharedList"] {
             if let list = bag[key] as? [Any] {
                 return list.compactMap { $0 as? [String: Any] }
             }
@@ -156,7 +221,7 @@ enum QihooCloudClient {
         return []
     }
 
-    private static func device(account: LinkedAccount, row: [String: Any]) -> IoTDevice {
+    private static func device(account: LinkedAccount, row: [String: Any], roomName: String) -> IoTDevice {
         let sn = jsonString(row["sn"]) ?? UUID().uuidString
         let devType = jsonInt(row["devType"]) ?? 0
         let title = (jsonString(row["title"]) ?? jsonString(row["hardware"]) ?? "360 设备").trimmingCharacters(in: .whitespaces)
@@ -172,7 +237,7 @@ enum QihooCloudClient {
             online: (jsonInt(row["online"]) ?? 0) != 0,
             specType: vacuum ? "vacuum" : "device",
             localIP: nil,
-            roomName: "全部设备",
+            roomName: roomName,
             homeName: "360 智慧生活",
             homeId: "qihoo",
             accountId: account.id,
