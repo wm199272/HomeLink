@@ -339,7 +339,7 @@ struct MiotControlView: View {
     private func optionGroup(
         _ title: String,
         ref: MiotPropertyRef?,
-        glyph: (String) -> String
+        glyph: @escaping (String) -> String
     ) -> some View {
         if let ref, let options = ref.property.valueList, !options.isEmpty {
             VStack(alignment: .leading, spacing: 14) {
