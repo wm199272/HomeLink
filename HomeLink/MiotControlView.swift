@@ -17,9 +17,6 @@ struct MiotControlView: View {
     @State private var drafts: [String: Double] = [:]
     @State private var isLoading = false
     @State private var message: String?
-    @State private var vacuumRooms: [VacuumRoom] = []
-    @State private var selectedRooms: Set<Int> = []
-    @State private var didLoadRooms = false
     @State private var sheet: VacuumSheet?
 
     var body: some View {
@@ -35,21 +32,20 @@ struct MiotControlView: View {
                 }
                 if let vacuum = roles.vacuum {
                     vacuumStatus(vacuum)
-                    vacuumMap(vacuum)
+                    vacuumHero(vacuum)
                     vacuumActions(vacuum)
-                    vacuumRows(vacuum)
-                    vacuumStation(vacuum)
+                    vacuumModeRow(vacuum)
                 } else {
                     hero
                     modeSection
                     fanSection
                     swingSection
+                    toggleSection
+                    sliderSection
+                    chooserSection
+                    readingSection
+                    actionSection
                 }
-                toggleSection
-                sliderSection
-                chooserSection
-                readingSection
-                actionSection
                 SectionCard("信息", symbol: "info.circle") {
                     DeviceInfoContent(device: device)
                 }
@@ -70,7 +66,7 @@ struct MiotControlView: View {
         .task(id: device.id) { await load() }
         .sheet(item: $sheet) { which in
             switch which {
-            case .rooms: roomSheet()
+            case .station: stationSheet()
             case .settings: settingsSheet()
             }
         }
@@ -171,209 +167,87 @@ struct MiotControlView: View {
         }
     }
 
-    /// 扫地机页的主体：房间格就是这块「地图」。
-    ///
-    /// 米家里的那张地图是机器人自己画出来的栅格图，走的不是 MIoT 描述这条路，
-    /// 所以这里用房间格代替：一眼看清有哪些房间、点一下选中，开始清洁就只扫选中的。
+    /// 中间只显示当前状态，不再摆房间格和一堆读数。
     @ViewBuilder
-    private func vacuumMap(_ vacuum: VacuumRoles) -> some View {
-        SectionCard(symbol: "robotic.vacuum.fill") {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 8) {
+    private func vacuumHero(_ vacuum: VacuumRoles) -> some View {
+        SectionCard {
+            VStack(spacing: 14) {
+                HStack {
                     Text(vacuumStateText(vacuum))
                         .font(.subheadline.weight(.semibold))
                     Spacer(minLength: 0)
                     if isLoading {
                         ProgressView().controlSize(.small)
-                    } else if let progress = vacuumProgress(vacuum) {
-                        Text("\(Int(progress))%")
-                            .font(.subheadline.weight(.medium))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
                     }
                 }
-                if let progress = vacuumProgress(vacuum), progress > 0 {
-                    ProgressView(value: progress, total: 100)
-                        .tint(Color.moss)
-                }
-                if vacuumRooms.isEmpty {
-                    HStack(spacing: 14) {
-                        Image(systemName: "robotic.vacuum.fill")
-                            .font(.system(size: 34, weight: .light))
-                            .foregroundStyle(Color.moss)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(vacuumRoomHint)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                            Text("这台扫地机没有上报房间列表，点「开始清洁」扫全屋。")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    TileGrid(columns: 3) {
-                        ForEach(vacuumRooms) { room in
-                            RoomTile(
-                                room: room,
-                                selected: selectedRooms.contains(room.id),
-                                enabled: !isLoading && device.online
-                            ) {
-                                toggleRoom(room)
-                            }
-                        }
-                    }
-                    Text(vacuumRoomHint)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Image(systemName: "robotic.vacuum.fill")
+                    .font(.system(size: 54, weight: .light))
+                    .foregroundStyle(Color.moss)
+                    .frame(height: 90)
                 if let fault = vacuumFaultText(vacuum) {
                     Label(fault, systemImage: "exclamationmark.triangle.fill")
                         .font(.footnote)
                         .foregroundStyle(Color.clay)
                 }
-                let candidates: [(String, MiotPropertyRef?)] = [
-                    ("已扫面积", vacuum.cleanedArea),
-                    ("已扫时长", vacuum.cleanedDuration),
-                ]
-                let tiles: [(String, MiotPropertyRef)] = candidates.compactMap { name, ref in
-                    guard let ref, values[ref.id] != nil else { return nil }
-                    return (name, ref)
-                }
-                if !tiles.isEmpty {
-                    TileGrid {
-                        ForEach(Array(tiles.enumerated()), id: \.offset) { _, item in
-                            ReadoutTile(
-                                title: item.0,
-                                symbol: ControlIcon.symbol(for: item.1.name),
-                                value: readoutText(item.1)
-                            )
-                        }
-                    }
-                }
             }
+            .frame(maxWidth: .infinity)
         }
-        .controlGroup(canControl)
     }
 
-    /// 下面那两颗大按钮：基座、开始清洁／暂停。
+    /// 基座打开集尘 / 洗拖布 / 烘干；旁边是开始、暂停、停止。
     @ViewBuilder
     private func vacuumActions(_ vacuum: VacuumRoles) -> some View {
-        HStack(spacing: 12) {
-            if vacuum.dock != nil {
+        let running = vacuumIsRunning(vacuum)
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                if hasStationActions(vacuum) {
+                    BigActionButton(
+                        title: "基座",
+                        caption: "集尘 · 洗拖布 · 烘干",
+                        symbol: "house.fill",
+                        tint: Color.secondary,
+                        enabled: canControl
+                    ) {
+                        sheet = .station
+                    }
+                }
                 BigActionButton(
-                    title: "基座",
-                    caption: "回充",
-                    symbol: "bolt.square.fill",
-                    tint: Color.secondary,
+                    title: running ? "暂停" : "开始清洁",
+                    symbol: running ? "pause.fill" : "play.fill",
+                    tint: ControlPalette.cool,
+                    highlighted: !running,
+                    enabled: canControl && (running ? vacuum.pause != nil || vacuum.stop != nil : vacuum.start != nil || vacuum.on != nil)
+                ) {
+                    if running {
+                        sendVacuumAction(vacuum.pause ?? vacuum.stop, "已暂停")
+                    } else {
+                        startVacuumCleaning(vacuum)
+                    }
+                }
+            }
+            if vacuum.stop != nil {
+                BigActionButton(
+                    title: "停止清洁",
+                    symbol: "stop.fill",
+                    tint: Color.clay,
+                    enabled: canControl && running
+                ) {
+                    sendVacuumAction(vacuum.stop, "已停止清洁")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func vacuumModeRow(_ vacuum: VacuumRoles) -> some View {
+        if hasCleanSettings(vacuum) {
+            SectionCard {
+                SettingRow(
+                    title: "模式",
+                    value: sweepModeText(vacuum),
                     enabled: canControl
                 ) {
-                    sendVacuumAction(vacuum.dock, "已让扫地机回充")
-                }
-            }
-            let running = vacuumIsRunning(vacuum)
-            BigActionButton(
-                title: running ? "暂停" : "开始清洁",
-                caption: running ? nil : (selectedRooms.isEmpty ? "全屋" : "已选 \(selectedRooms.count) 个房间"),
-                symbol: running ? "pause.fill" : "play.fill",
-                tint: ControlPalette.cool,
-                highlighted: !running,
-                enabled: canControl && (running || vacuum.start != nil || vacuum.roomStart != nil || vacuum.on != nil)
-            ) {
-                if running {
-                    sendVacuumAction(vacuum.pause ?? vacuum.stop, "已暂停")
-                } else {
-                    startVacuumCleaning(vacuum)
-                }
-            }
-        }
-    }
-
-    /// 「区域 全屋 ›」「模式 仅拖地 ›」两行，点开去设置。
-    @ViewBuilder
-    private func vacuumRows(_ vacuum: VacuumRoles) -> some View {
-        if !vacuumRooms.isEmpty || hasCleanSettings(vacuum) {
-            SectionCard {
-                VStack(spacing: 14) {
-                    if !vacuumRooms.isEmpty {
-                        SettingRow(
-                            title: "区域",
-                            value: selectedRooms.isEmpty ? "全屋" : "已选 \(selectedRooms.count) 个房间",
-                            enabled: canControl
-                        ) {
-                            sheet = .rooms
-                        }
-                    }
-                    if hasCleanSettings(vacuum) {
-                        SettingRow(
-                            title: "模式",
-                            value: sweepModeText(vacuum),
-                            enabled: canControl
-                        ) {
-                            sheet = .settings
-                        }
-                    }
-                }
-            }
-            .controlGroup(canControl)
-        }
-    }
-
-    /// 基站的动作和剩余时间（洗拖布、烘干、集尘），只在设备上报了这些列时出现。
-    @ViewBuilder
-    private func vacuumStation(_ vacuum: VacuumRoles) -> some View {
-        let actions = [vacuum.mopWash, vacuum.dry, vacuum.dustArrest].compactMap { $0 }
-        let candidates: [(String, MiotPropertyRef?)] = [
-            ("洗拖布剩余", vacuum.mopWashLeft),
-            ("烘干剩余", vacuum.dryLeft),
-            ("集尘剩余", vacuum.dustLeft),
-        ]
-        let lefts: [(String, MiotPropertyRef)] = candidates.compactMap { pair in
-            guard let ref = pair.1, values[ref.id] != nil else { return nil }
-            return (pair.0, ref)
-        }
-        let station = stationText(vacuum)
-
-        if !actions.isEmpty || !lefts.isEmpty || station != nil {
-            SectionCard("基站", symbol: "house.fill") {
-                VStack(alignment: .leading, spacing: 14) {
-                    if let station {
-                        Text(station)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    if !actions.isEmpty {
-                        WrapLayout(spacing: 10, lineSpacing: 10) {
-                            ForEach(actions) { ref in
-                                Button {
-                                    sendVacuumAction(ref, "已下发" + MiotNaming.title(type: ref.action.type, fallback: ref.action.description))
-                                } label: {
-                                    Label(
-                                        MiotNaming.title(type: ref.action.type, fallback: ref.action.description),
-                                        systemImage: ControlIcon.symbol(for: ref.name)
-                                    )
-                                    .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(Color.moss)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 9)
-                                    .background(Color.moss.opacity(0.12), in: Capsule())
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!canControl)
-                            }
-                        }
-                    }
-                    if !lefts.isEmpty {
-                        TileGrid {
-                            ForEach(Array(lefts.enumerated()), id: \.offset) { _, item in
-                                ReadoutTile(
-                                    title: item.0,
-                                    symbol: "timer",
-                                    value: readoutText(item.1)
-                                )
-                            }
-                        }
-                    }
+                    sheet = .settings
                 }
             }
             .controlGroup(canControl)
@@ -382,73 +256,102 @@ struct MiotControlView: View {
 
     // MARK: - 扫地机的弹窗
 
-    private func roomSheet() -> some View {
+    private func stationSheet() -> some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    WrapLayout(spacing: 10, lineSpacing: 10) {
-                        ChoiceChip(title: "全屋", selected: selectedRooms.isEmpty) {
-                            selectedRooms = []
+            VStack(spacing: 28) {
+                if let vacuum = roles.vacuum {
+                    HStack(spacing: 8) {
+                        VacuumCircleButton(
+                            title: "集尘",
+                            symbol: "sparkles",
+                            selected: false,
+                            enabled: canControl && vacuum.dustArrest != nil
+                        ) {
+                            sendVacuumAction(vacuum.dustArrest, "已开始集尘")
+                            sheet = nil
                         }
-                        ForEach(vacuumRooms) { room in
-                            ChoiceChip(title: room.displayName, selected: selectedRooms.contains(room.id)) {
-                                toggleRoom(room)
-                            }
+                        VacuumCircleButton(
+                            title: "洗拖布",
+                            symbol: "drop.fill",
+                            selected: false,
+                            enabled: canControl && vacuum.mopWash != nil
+                        ) {
+                            sendVacuumAction(vacuum.mopWash, "已开始洗拖布")
+                            sheet = nil
+                        }
+                        VacuumCircleButton(
+                            title: "烘干",
+                            symbol: "wind",
+                            selected: false,
+                            enabled: canControl && vacuum.dry != nil
+                        ) {
+                            sendVacuumAction(vacuum.dry, "已开始烘干")
+                            sheet = nil
                         }
                     }
-                    Text("选好后点「开始清洁」，只扫选中的房间；一个都不选就是全屋。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    .padding(.top, 12)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(20)
+                Spacer(minLength: 0)
+                Button("收起") { sheet = nil }
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
             }
+            .padding(24)
             .background(Color.paper)
-            .navigationTitle("区域")
+            .navigationTitle("基座")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { sheet = nil }
-                }
-            }
         }
+        .presentationDetents([.height(280)])
     }
 
     private func settingsSheet() -> some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 28) {
                     if let vacuum = roles.vacuum {
-                        optionGroup("扫拖模式", ref: vacuum.sweepMopType)
-                        optionGroup("吸力", ref: vacuum.suction)
-                        optionGroup("拖地水量", ref: vacuum.waterLevel)
-                        optionGroup("清扫方式", ref: vacuum.sweepType)
+                        optionGroup("扫拖模式", ref: vacuum.sweepMopType, glyph: VacuumGlyph.sweepMop)
+                        optionGroup("吸力设置", ref: vacuum.suction, glyph: VacuumGlyph.suction)
+                        optionGroup("拖地水量", ref: vacuum.waterLevel, glyph: VacuumGlyph.water)
+                        optionGroup("清洁路径", ref: vacuum.route, glyph: VacuumGlyph.route)
                     }
                 }
                 .padding(20)
             }
             .background(Color.paper)
-            .navigationTitle("清洁设置")
+            .navigationTitle("清洁选择")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") { sheet = nil }
+                }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("完成") { sheet = nil }
+                    Button("确定") { sheet = nil }
                 }
             }
         }
+        .presentationDetents([.large])
     }
 
     @ViewBuilder
-    private func optionGroup(_ title: String, ref: MiotPropertyRef?) -> some View {
+    private func optionGroup(
+        _ title: String,
+        ref: MiotPropertyRef?,
+        glyph: (String) -> String
+    ) -> some View {
         if let ref, let options = ref.property.valueList, !options.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 14) {
                 Text(title)
                     .font(.subheadline.weight(.semibold))
-                WrapLayout(spacing: 10, lineSpacing: 10) {
+                HStack(spacing: 4) {
                     ForEach(Array(options.enumerated()), id: \.offset) { _, option in
-                        ChoiceChip(
+                        VacuumCircleButton(
                             title: VacuumNaming.optionTitle(option.description, property: ref.name),
-                            selected: values[ref.id] == option.value
+                            symbol: glyph(option.description),
+                            selected: values[ref.id] == option.value,
+                            enabled: canControl
                         ) {
                             write(ref, value: option.value)
                         }
@@ -661,8 +564,6 @@ struct MiotControlView: View {
             let spec = try await model.spec(for: device)
             roles = MiotRoles(spec: spec)
             values = try await readValues(spec: spec)
-            didLoadRooms = false
-            syncRooms()
         } catch {
             message = humanize(error)
         }
@@ -673,7 +574,6 @@ struct MiotControlView: View {
         guard let spec = try? await model.spec(for: device),
               let next = try? await readValues(spec: spec) else { return }
         values = next
-        syncRooms()
     }
 
     private func readValues(spec: MiotSpec) async throws -> [String: JSONScalar] {
@@ -688,33 +588,6 @@ struct MiotControlView: View {
             next["\(reading.siid).\(reading.piid)"] = value
         }
         return next
-    }
-
-    /// 房间列表取回来；第一次顺便把设备当前选中的房间带上，
-    /// 之后每次刷新都保留用户在界面上的选择。
-    private func syncRooms() {
-        guard let vacuum = roles.vacuum else { return }
-        let rooms = VacuumRooms.parse(
-            roomInformation: vacuum.roomInformation.flatMap { values[$0.id] },
-            roomName: vacuum.roomName.flatMap { values[$0.id] },
-            roomIds: vacuum.roomIds.flatMap { values[$0.id] }
-        )
-        if rooms != vacuumRooms { vacuumRooms = rooms }
-        if !didLoadRooms {
-            selectedRooms = vacuum.roomIds.flatMap { VacuumRooms.selected(from: values[$0.id]) } ?? []
-            didLoadRooms = true
-        }
-        if !vacuumRooms.isEmpty {
-            selectedRooms.formIntersection(Set(vacuumRooms.map(\.id)))
-        }
-    }
-
-    private func toggleRoom(_ room: VacuumRoom) {
-        if selectedRooms.contains(room.id) {
-            selectedRooms.remove(room.id)
-        } else {
-            selectedRooms.insert(room.id)
-        }
     }
 
     /// 设备描述里认出来的属性，从任意位置取当前值。
@@ -898,14 +771,12 @@ struct MiotControlView: View {
         }
     }
 
-    private var vacuumRoomHint: String {
-        if vacuumRooms.isEmpty { return "没有读到房间" }
-        if selectedRooms.isEmpty { return "未选房间，开始清洁会扫全屋" }
-        return "已选 \(selectedRooms.count) 个房间，开始清洁只扫这些"
+    private func hasStationActions(_ vacuum: VacuumRoles) -> Bool {
+        vacuum.dustArrest != nil || vacuum.mopWash != nil || vacuum.dry != nil
     }
 
     private func hasCleanSettings(_ vacuum: VacuumRoles) -> Bool {
-        [vacuum.sweepMopType, vacuum.suction, vacuum.waterLevel, vacuum.sweepType]
+        [vacuum.sweepMopType, vacuum.suction, vacuum.waterLevel, vacuum.route]
             .contains { ref in
                 guard let ref else { return false }
                 return !(ref.property.valueList ?? []).isEmpty && ref.property.canWrite
@@ -913,10 +784,12 @@ struct MiotControlView: View {
     }
 
     private func sweepModeText(_ vacuum: VacuumRoles) -> String {
-        guard let ref = vacuum.sweepMopType, let value = values[ref.id] else {
-            return hasCleanSettings(vacuum) ? "去设置" : "暂无可调项"
+        var parts: [String] = []
+        for ref in [vacuum.sweepMopType, vacuum.suction, vacuum.waterLevel, vacuum.route] {
+            guard let ref, let value = values[ref.id] else { continue }
+            parts.append(vacuumOption(ref, value))
         }
-        return vacuumOption(ref, value)
+        return parts.isEmpty ? "去设置" : parts.joined(separator: " · ")
     }
 
     private func vacuumOption(_ ref: MiotPropertyRef, _ value: JSONScalar) -> String {
@@ -924,16 +797,6 @@ struct MiotControlView: View {
             return VacuumNaming.optionTitle(option.description, property: ref.name)
         }
         return value.displayText
-    }
-
-    /// 基站那一行状态文字。有的固件上报的是规规矩矩的一句话，有的是整段 JSON，
-    /// 后者直接丢掉，免得界面上出现一串大括号。
-    private func stationText(_ vacuum: VacuumRoles) -> String? {
-        guard let raw = current(vacuum.stationStatus), case let .string(text) = raw else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed.count > 30 { return nil }
-        if trimmed.hasPrefix("{") || trimmed.hasPrefix("[") { return nil }
-        return trimmed
     }
 
     private func sendVacuumAction(_ ref: MiotActionRef?, _ success: String) {
@@ -950,20 +813,10 @@ struct MiotControlView: View {
         }
     }
 
-    /// 有声明的房间就用 `start-room-sweep` 带上房间号，否则退回整机开始。
     private func startVacuumCleaning(_ vacuum: VacuumRoles) {
-        let ids = selectedRooms.sorted()
-        let roomList = ids.map(String.init).joined(separator: ",")
         Task {
             await run {
-                if !ids.isEmpty, let ref = vacuum.roomStart ?? vacuum.vacuumRoomStart {
-                    try await model.runAction(
-                        device: device,
-                        siid: ref.service.iid,
-                        aiid: ref.action.iid,
-                        inputs: [.string(roomList)]
-                    )
-                } else if let ref = vacuum.start {
+                if let ref = vacuum.start ?? vacuum.resume {
                     try await model.runAction(device: device, siid: ref.service.iid, aiid: ref.action.iid)
                 } else if let ref = vacuum.on {
                     try await model.setProperty(device: device, siid: ref.service.iid, piid: ref.property.iid, value: .bool(true))
@@ -971,9 +824,7 @@ struct MiotControlView: View {
                     throw XiaomiError.failed("这台扫地机没有公开开始清扫的指令")
                 }
             }
-            if message == nil {
-                message = ids.isEmpty ? "已开始全屋清洁" : "已开始清扫选中的房间"
-            }
+            if message == nil { message = "已开始清洁" }
             await refresh()
         }
     }
@@ -1158,6 +1009,11 @@ struct MiotRoles {
                 .compactMap { $0?.id }
         )
         if let vacuumRoles = vacuum { claimed.formUnion(vacuumRoles.claimed) }
+        // 扫地机只保留快捷操作，其余开关、滑杆、选项、读数、动作一律不摆。
+        if vacuum != nil {
+            actions = []
+            return
+        }
         let noisy = ["fault", "abnormal-condition"]
 
         for ref in props where ref.property.visible && !claimed.contains(ref.id) {

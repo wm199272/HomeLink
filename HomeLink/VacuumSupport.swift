@@ -19,30 +19,61 @@ enum VacuumNaming {
         "sweep-mop-type": [
             "sweep": "仅扫地",
             "mop": "仅拖地",
-            "sweep mop": "扫拖同时",
-            "sweep and mop": "扫拖同时",
+            "sweep mop": "扫拖同步",
+            "sweep and mop": "扫拖同步",
             "sweep before mopping": "先扫后拖",
             "sweep before mop": "先扫后拖",
         ],
         "suction-level": [
             "silent": "安静",
+            "quiet": "安静",
             "basic": "标准",
-            "strong": "强劲",
+            "standard": "标准",
+            "strong": "强力",
             "full speed": "超强",
             "max": "超强",
+            "turbo": "超强",
         ],
         "fan-level": [
             "auto": "自动",
-            "level1": "1 档",
-            "level2": "2 档",
-            "level3": "3 档",
-            "level4": "4 档",
+            "level1": "1档",
+            "level2": "2档",
+            "level3": "3档",
+            "level4": "4档",
         ],
         "mop-water-output-level": [
             "off": "关",
-            "level1": "小",
-            "level2": "中",
-            "level3": "大",
+            "level1": "1档",
+            "level2": "2档",
+            "level3": "3档",
+        ],
+        "sweep-route": [
+            "fast": "快速清洁",
+            "quick": "快速清洁",
+            "rapid": "快速清洁",
+            "daily": "日常清洁",
+            "standard": "日常清洁",
+            "normal": "日常清洁",
+            "basic": "日常清洁",
+            "fine": "精细清洁",
+            "deep": "精细清洁",
+            "thorough": "精细清洁",
+            "intensive": "精细清洁",
+            "precision": "精细清洁",
+        ],
+        "vacuum-route": [
+            "fast": "快速清洁",
+            "quick": "快速清洁",
+            "rapid": "快速清洁",
+            "daily": "日常清洁",
+            "standard": "日常清洁",
+            "normal": "日常清洁",
+            "basic": "日常清洁",
+            "fine": "精细清洁",
+            "deep": "精细清洁",
+            "thorough": "精细清洁",
+            "intensive": "精细清洁",
+            "precision": "精细清洁",
         ],
         "sweep-type": [
             "global": "全屋",
@@ -221,18 +252,16 @@ enum VacuumRooms {
     }
 }
 
-/// 扫地机专用的一组角色：状态、电量、扫拖模式，以及清扫、回充、洗拖布这些动作。
-///
-/// 认出来的都从通用分桶里摘掉，剩下的（地毯增压、AI 识别、耗材寿命……）继续走
-/// 通用的开关、滑杆、选项和实时数据，所以不会因为这里少认了一个属性就丢功能。
+/// 扫地机只用到快捷操作：开始 / 暂停 / 停止、清洁选择、基座三件套。
+/// 其余属性一律认下来藏掉，不再落到通用开关、滑杆里。
 struct VacuumRoles {
     var status: MiotPropertyRef?
     var sweepStatus: MiotPropertyRef?
     var fault: MiotPropertyRef?
     var sweepMopType: MiotPropertyRef?
-    var sweepType: MiotPropertyRef?
     var suction: MiotPropertyRef?
     var waterLevel: MiotPropertyRef?
+    var route: MiotPropertyRef?
     var batteryLevel: MiotPropertyRef?
     var chargingState: MiotPropertyRef?
     var chargeProgress: MiotPropertyRef?
@@ -240,9 +269,6 @@ struct VacuumRoles {
     var progress: MiotPropertyRef?
     var cleanedArea: MiotPropertyRef?
     var cleanedDuration: MiotPropertyRef?
-    var roomInformation: MiotPropertyRef?
-    var roomName: MiotPropertyRef?
-    var roomIds: MiotPropertyRef?
     var stationStatus: MiotPropertyRef?
     var mopWashLeft: MiotPropertyRef?
     var dryLeft: MiotPropertyRef?
@@ -253,8 +279,6 @@ struct VacuumRoles {
     var dock: MiotActionRef?
     var pause: MiotActionRef?
     var resume: MiotActionRef?
-    var roomStart: MiotActionRef?
-    var vacuumRoomStart: MiotActionRef?
     var mopWash: MiotActionRef?
     var dry: MiotActionRef?
     var dustArrest: MiotActionRef?
@@ -292,9 +316,9 @@ struct VacuumRoles {
         sweepStatus = pick(["sweep-mop-status"])
         fault = pick(["fault"])
         sweepMopType = pick(["sweep-mop-type"])
-        sweepType = pick(["sweep-type"])
         suction = pick(["suction-level", "fan-level", "speed-level"])
         waterLevel = pick(["mop-water-output-level"])
+        route = pick(["sweep-route", "vacuum-route"])
         batteryLevel = pick(["battery-level"], services: ["battery"])
         chargingState = pick(["charging-state"], services: ["battery"])
         chargeProgress = pick(["charge-progress"], services: ["battery"])
@@ -302,9 +326,6 @@ struct VacuumRoles {
         progress = pick(["cleaning-progress"])
         cleanedArea = pick(["statistical-clean-area", "cleaning-area"])
         cleanedDuration = pick(["statistical-cleaning-duration", "cleaning-time"])
-        roomInformation = pick(["room-information"])
-        roomName = pick(["room-name"])
-        roomIds = pick(["vacuum-room-ids", "room-ids", "zone-ids"])
         stationStatus = pick(["base-station-working-status"])
         mopWashLeft = pick(["mop-wash-left-time"])
         dryLeft = pick(["dry-left-time"])
@@ -316,65 +337,102 @@ struct VacuumRoles {
         dock = action(["stop-and-gocharge", "start-gocharge", "gocharge"])
         pause = action(["pause-sweeping", "pause-build-map"])
         resume = action(["continue-sweep", "sweep"])
-        roomStart = action(["start-room-sweep"])
-        vacuumRoomStart = action(["start-vacuum-room-sweep"])
         mopWash = action(["start-mop-wash"])
         dry = action(["start-dry"])
         dustArrest = action(["start-dust-arrest"])
 
+        for ref in properties where ["vacuum", "battery", "mop", "dust-bag", "vacuum-map"].contains(ref.serviceName) {
+            claimed.insert(ref.id)
+        }
         for ref in [
-            status, sweepStatus, fault, sweepMopType, sweepType, suction, waterLevel,
+            status, sweepStatus, fault, sweepMopType, suction, waterLevel, route,
             batteryLevel, chargingState, chargeProgress, lastClean, progress,
-            cleanedArea, cleanedDuration, roomInformation, roomName, roomIds,
-            stationStatus, mopWashLeft, dryLeft, dustLeft, on,
+            cleanedArea, cleanedDuration, stationStatus, mopWashLeft, dryLeft, dustLeft, on,
         ].compactMap({ $0 }) {
             claimed.insert(ref.id)
         }
-        claimedActions = Set(
-            [start, stop, dock, pause, resume, mopWash, dry, dustArrest]
-                .compactMap { $0?.id }
-        )
+        claimedActions = Set(spec.uiActions.map(\.id))
     }
 }
 
-/// 扫地机页那张「地图」里的房间格。选中之后开始清洁就只扫这些房间。
-struct RoomTile: View {
-    var room: VacuumRoom
-    var selected: Bool
-    var enabled: Bool
+/// 扫地机页的两个弹窗：基座三件套、清洁选择。
+enum VacuumSheet: String, Identifiable {
+    case station
+    case settings
+
+    var id: String { rawValue }
+}
+
+/// 米家里那种圆按钮：扫拖模式、吸力、水量、基站动作都是它。
+struct VacuumCircleButton: View {
+    var title: String
+    var symbol: String
+    var selected = false
+    var enabled = true
     var action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
-                Image(systemName: selected ? "checkmark.circle.fill" : "square.dashed")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(selected ? Color.white : Color.moss)
-                Text(room.displayName)
-                    .font(.subheadline.weight(selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? Color.white : Color.primary)
+            VStack(spacing: 8) {
+                Image(systemName: symbol)
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundStyle(selected ? Color.white : Color.primary.opacity(0.55))
+                    .frame(width: 64, height: 64)
+                    .background(selected ? Color.vacuumBlue : Color.primary.opacity(0.06), in: Circle())
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(selected ? Color.vacuumBlue : Color.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                selected ? Color.moss : Color.moss.opacity(0.08),
-                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-            )
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(.plain)
         .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.6)
+        .opacity(enabled ? 1 : 0.45)
     }
 }
 
-/// 扫地机页的两个弹窗：选区域、调清洁设置。
-enum VacuumSheet: String, Identifiable {
-    case rooms
-    case settings
+extension Color {
+    /// 米家扫地机选中态那个蓝。
+    fileprivate static let vacuumBlue = Color(red: 0.18, green: 0.55, blue: 0.98)
+}
 
-    var id: String { rawValue }
+enum VacuumGlyph {
+    static func sweepMop(_ raw: String) -> String {
+        switch VacuumNaming.optionTitle(raw, property: "sweep-mop-type") {
+        case "仅扫地": "house"
+        case "扫拖同步": "arrow.triangle.2.circlepath"
+        case "先扫后拖": "square.split.2x1"
+        default: "drop.fill"
+        }
+    }
+
+    static func suction(_ raw: String) -> String {
+        switch VacuumNaming.optionTitle(raw, property: "suction-level") {
+        case "安静": "fan"
+        case "标准": "fan.fill"
+        case "强力": "wind"
+        default: "tornado"
+        }
+    }
+
+    static func water(_ raw: String) -> String {
+        switch VacuumNaming.optionTitle(raw, property: "mop-water-output-level") {
+        case "关": "drop"
+        case "1档": "drop"
+        case "2档": "drop.fill"
+        default: "drop.fill"
+        }
+    }
+
+    static func route(_ raw: String) -> String {
+        switch VacuumNaming.optionTitle(raw, property: "sweep-route") {
+        case "快速清洁": "point.topleft.down.to.point.bottomright.curvepath"
+        case "精细清洁": "square.grid.3x3.fill"
+        default: "s.circle"
+        }
+    }
 }
 
 /// 扫地机页顶那颗浅灰胶囊：左边最近清洁的时间，右边电量。跟米家那颗一样。
