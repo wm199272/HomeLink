@@ -27,6 +27,7 @@ final class XiaomiLinkModel {
 
     private let client = XiaomiCloudClient()
     private var pollTask: Task<Void, Never>?
+    private var rescueTask: Task<Void, Never>?
     private var backgroundedAt: Date?
     private var autoRefreshCount = 0
     private var ticker: Task<Void, Never>?
@@ -53,6 +54,7 @@ final class XiaomiLinkModel {
 
     func stop() {
         pollTask?.cancel()
+        rescueTask?.cancel()
         stopTicker()
         isPolling = false
         isBusy = false
@@ -101,6 +103,18 @@ final class XiaomiLinkModel {
         if !completed, let session = client.readySession {
             dlog("网页 cookie 补齐了全部凭证，直接完成关联")
             finish(session)
+            return
+        }
+        // 光有 serviceToken / userId 还不够，ssecurity 只能从账号接口拿。
+        // 攒到 cookie 之后再用它们换一次完整会话；多次回调只跑最后一次。
+        rescueTask?.cancel()
+        rescueTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            guard !Task.isCancelled, let self else { return }
+            dlog("尝试用网页 cookie 补 ssecurity 并完成会话")
+            guard let session = await self.client.completeFromAccountCookies() else { return }
+            guard !Task.isCancelled, !self.completed else { return }
+            self.finish(session)
         }
     }
 

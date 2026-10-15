@@ -380,6 +380,9 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         }
         fields.append(("_json", "true"))
         if let captcha, !captcha.isEmpty {
+            // 网页端用 captCode，但账号接口这套认的是 captcha；
+            // 两个都带上，避免只发一个而服务端读不到、又回 87001。
+            fields.append(("captcha", captcha))
             fields.append(("captCode", captcha))
         }
         var components = URLComponents(string: "https://account.xiaomi.com/pass/serviceLoginAuth2")
@@ -395,10 +398,12 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
 
     private func interpret(_ json: [String: Any]) async throws -> LoginChallenge {
         if let captchaURL = jsonString(json["captchaUrl"]), !captchaURL.isEmpty {
+            dlog("登录需要验证码：captchaUrl 已下发")
             let image = try await download(absoluteAccountURL(captchaURL))
             return .captcha(image)
         }
         if let notificationURL = jsonString(json["notificationUrl"]), !notificationURL.isEmpty {
+            dlog("登录需要二次验证")
             return try await beginTwoFactor(notificationURL: notificationURL)
         }
         absorb(json)
@@ -411,6 +416,7 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         }
         let code = jsonInt(json["code"])
         let desc = (json["desc"] as? String) ?? (json["tips"] as? String) ?? (json["description"] as? String)
+        dlog("登录结果 code=\(code.map { String($0) } ?? "nil") desc=\(desc ?? "-") 缺：\(sessionMissing())")
         if code == 70016 || code == 70002 {
             throw XiaomiError.failed(desc ?? "账号或密码不正确")
         }
@@ -581,6 +587,38 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         if userId == nil { missing.append("userId") }
         if serviceToken == nil { missing.append("serviceToken") }
         return missing.isEmpty ? "无" : missing.joined(separator: ",")
+    }
+
+    /// App 内网页登录之后，用网页留下的 cookie 去补一次完整会话。
+    ///
+    /// 为什么需要它：`ssecurity` 只会出现在登录接口的 JSON 里，网页登录把
+    /// serviceToken / userId 留在了 WebView 的 cookie 里，ssecurity 却不会凭空出现，
+    /// 会话永远凑不齐，表现就是一直停在「正在等小米把会话交过来」。
+    /// 带着账号 cookie 请求 serviceLogin 时，服务端会直接返回 ssecurity 和 location。
+    func completeFromAccountCookies() async -> XiaomiSession? {
+        if let session = currentSession() { return session }
+        var components = URLComponents(string: "https://account.xiaomi.com/pass/serviceLogin")
+        components?.queryItems = [
+            URLQueryItem(name: "sid", value: "xiaomiio"),
+            URLQueryItem(name: "_json", value: "true"),
+        ]
+        guard let url = components?.url else { return nil }
+        guard let (data, http) = try? await getRaw(url.absoluteString, follow: false),
+              let json = try? parse(data) else {
+            dlog("用网页 cookie 换会话：serviceLogin 没有返回可用 JSON")
+            return nil
+        }
+        absorb(json)
+        let location = jsonString(json["location"])
+        dlog("用网页 cookie 换会话：status=\(http.statusCode) ssecurity=\(ssecurity != nil) location=\(location != nil) 仍缺：\(sessionMissing())")
+        if let location {
+            try? await exchange(location: location)
+        }
+        if userId == nil, let uid = cookie("userId"), !uid.isEmpty { userId = uid }
+        if serviceToken == nil, let token = cookie("serviceToken"), !token.isEmpty { serviceToken = token }
+        let session = currentSession()
+        dlog("用网页 cookie 换会话结果：\(session != nil ? "成功" : "失败，仍缺 \(sessionMissing())")")
+        return session
     }
 
     /// 当前 cookie 库里有哪些名字（只记名字，不记值，避免泄露凭证）。

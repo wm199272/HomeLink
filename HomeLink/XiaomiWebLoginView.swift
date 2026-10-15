@@ -19,6 +19,7 @@ struct XiaomiWebLoginView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var isFinished = false
+    @State private var waitedSeconds = 0
 
     var body: some View {
         NavigationStack {
@@ -35,10 +36,23 @@ struct XiaomiWebLoginView: View {
                             .font(.footnote)
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.secondary)
+                        if waitedSeconds >= 15 {
+                            Text("已经等了 \(waitedSeconds) 秒。如果一直停在这里，点左上角「关闭」回到关联页，展开下面的「诊断信息」复制发我；也可以改用「账号密码」方式登录。")
+                                .font(.caption2)
+                                .multilineTextAlignment(.center)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                     .padding(20)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                     .padding(24)
+                    .task {
+                        while !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 1_000_000_000)
+                            if Task.isCancelled { break }
+                            waitedSeconds += 1
+                        }
+                    }
                 }
             }
             .navigationTitle("在小米账号里确认")
