@@ -19,18 +19,24 @@ final class XiaomiLinkModel {
     var notice: String?
     var isBusy = false
     var isPolling = false
+    /// 在 App 内打开小米确认页，避免切到 Safari 后 App 被挂起、长轮询被打断。
+    var showWebLogin = false
+    /// 已经等了多久（秒），用来给用户可见的等待反馈。
+    var waitedSeconds = 0
     var onSession: ((XiaomiSession, String) -> Void)?
 
     private let client = XiaomiCloudClient()
     private var pollTask: Task<Void, Never>?
     private var backgroundedAt: Date?
     private var autoRefreshCount = 0
+    private var ticker: Task<Void, Never>?
+    private var completed = false
 
     enum Mode { case qr, password }
     enum Phase { case form, captcha, twoFactor }
 
     func appear() {
-        guard mode == .qr else { return }
+        guard mode == .qr, !completed else { return }
         // 已经有二维码并还在有效期内，就别重新生成（从 Safari 返回时会再次触发 onAppear）。
         if qrImage != nil {
             if isPolling || isBusy { return }
@@ -46,6 +52,7 @@ final class XiaomiLinkModel {
 
     func stop() {
         pollTask?.cancel()
+        stopTicker()
         isPolling = false
         isBusy = false
     }
@@ -56,25 +63,47 @@ final class XiaomiLinkModel {
     }
 
     func returnedToForeground() {
-        guard mode == .qr else { return }
+        guard mode == .qr, !completed else { return }
         let away = backgroundedAt.map { Date().timeIntervalSince($0) } ?? 0
         backgroundedAt = nil
         client.extendQRDeadline(by: away)
-        // 轮询任务看着还活着，但可能卡在挂起前已经作废的那个请求上，太久没动静就重挂一次。
-        if isPolling {
-            if Date().timeIntervalSince(client.lastPollActivity) > 30 {
-                resumeQR()
-            }
-            return
-        }
         guard !isBusy else { return }
-        // 关键：去浏览器确认过的那张二维码不能重新生成，否则会把已经确认的会话作废。
-        // 只要还在有效期内，就复用同一个 long polling 地址继续等结果。
+        // 回前台一律立刻重新轮询：挂起前那个在飞的请求已经被系统作废，
+        // 指望它自己醒过来是等不到的（这就是「切回来没有任何反应」的原因）。
         if qrImage != nil, client.hasActiveQR {
             resumeQR()
         } else if qrImage != nil || error != nil || notice != nil || pollTask == nil {
             startQR()
         }
+    }
+
+    /// 用户说「我已经在浏览器里确认了」，立刻再检查一次。
+    func recheckNow() {
+        guard mode == .qr, !completed else { return }
+        notice = "正在重新检查确认结果…"
+        if client.hasActiveQR, qrImage != nil {
+            resumeQR()
+        } else {
+            startQR()
+        }
+    }
+
+    private func startTicker() {
+        stopTicker()
+        waitedSeconds = 0
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { break }
+                guard let self else { break }
+                self.waitedSeconds += 1
+            }
+        }
+    }
+
+    private func stopTicker() {
+        ticker?.cancel()
+        ticker = nil
     }
 
     func select(_ mode: Mode) {
@@ -179,21 +208,26 @@ final class XiaomiLinkModel {
             }
             isBusy = false
             isPolling = true
+            startTicker()
             let session: XiaomiSession
             do {
                 session = try await client.waitForQR()
             } catch {
                 isPolling = false
+                stopTicker()
                 throw error
             }
             isPolling = false
+            stopTicker()
             if Task.isCancelled { return }
             finish(session)
         } catch is CancellationError {
             isPolling = false
+            stopTicker()
             isBusy = false
         } catch XiaomiError.qrExpired {
             isPolling = false
+            stopTicker()
             guard !Task.isCancelled else { return }
             // 过期不是失败：直接换一张新二维码，别让用户面对一个死掉的页面。
             if autoRefreshCount < 3 {
@@ -207,6 +241,7 @@ final class XiaomiLinkModel {
             }
         } catch {
             isPolling = false
+            stopTicker()
             if !Task.isCancelled {
                 self.error = humanize(error)
                 isBusy = false
@@ -231,6 +266,9 @@ final class XiaomiLinkModel {
 
     private func finish(_ session: XiaomiSession) {
         autoRefreshCount = 0
+        completed = true
+        showWebLogin = false
+        stopTicker()
         let label = username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? "小米用户 \(session.userId.suffix(4))"
             : maskedAccount(username)
@@ -301,6 +339,18 @@ struct XiaomiLinkView: View {
         .background(Color.paper)
         .navigationTitle("关联米家")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: Binding(
+            get: { link.showWebLogin },
+            set: { link.showWebLogin = $0 }
+        )) {
+            if let url = link.loginURL {
+                XiaomiWebLoginView(url: url) {
+                    // 网页侧确认完了，长轮询大概率已经拿到结果；
+                    // 再主动检查一次，避免刚好错过那一轮。
+                    link.recheckNow()
+                }
+            }
+        }
         .onAppear {
             link.onSession = { session, name in
                 model.link(LinkedAccount(
@@ -330,6 +380,17 @@ struct XiaomiLinkView: View {
         }
     }
 
+    /// 二维码区域下方那行状态文字，让用户知道 App 一直在等，而不是「没反应」。
+    private var statusLine: String {
+        if link.isPolling {
+            return "等待确认中（已等 \(link.waitedSeconds) 秒），确认后会立刻完成关联"
+        }
+        if link.isBusy {
+            return "正在准备二维码…"
+        }
+        return "二维码已就绪"
+    }
+
     private var qrForm: some View {
         VStack(alignment: .leading, spacing: 14) {
             ZStack {
@@ -350,24 +411,42 @@ struct XiaomiLinkView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Text("打开米家或小米账号的扫一扫，扫描这个二维码并确认登录。")
+            Text("用米家 App 扫这个二维码，或者在下方直接打开确认页登录。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             if link.qrImage != nil && link.error == nil {
-                Text(link.isPolling ? "等待确认中，可以切到米家或浏览器操作，这里会一直等" : "正在准备二维码")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    if link.isPolling {
+                        ProgressView().controlSize(.mini)
+                    }
+                    Text(statusLine)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             Button("刷新二维码") { link.startQR() }
                 .buttonStyle(.bordered)
-            if let url = link.loginURL {
-                VStack(alignment: .leading, spacing: 4) {
-                    Link("在浏览器中打开确认页", destination: url)
-                        .font(.footnote)
-                    Text("浏览器里登录/确认成功后，请回到本 App，这里会自动完成关联（确认结果是通过后台长连接回传的，浏览器不会自己跳回来）。")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+            if link.loginURL != nil {
+                Button {
+                    link.showWebLogin = true
+                } label: {
+                    Label("在 App 内打开确认页并登录", systemImage: "safari")
+                        .frame(maxWidth: .infinity)
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(link.isBusy)
+                Text("在 App 内登录最稳：全程留在前台，确认完会自动完成关联。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if link.isPolling {
+                Button("我已经确认了，立即检查") { link.recheckNow() }
+                    .buttonStyle(.bordered)
+                    .font(.footnote)
+            }
+            if let url = link.loginURL {
+                Link("或在系统浏览器打开确认页", destination: url)
+                    .font(.caption)
             }
         }
     }
