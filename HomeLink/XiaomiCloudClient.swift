@@ -369,13 +369,19 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         try ensureControlSucceeded(json)
     }
 
-    func runAction(session: XiaomiSession, did: String, siid: Int, aiid: Int) async throws {
+    func runAction(
+        session: XiaomiSession,
+        did: String,
+        siid: Int,
+        aiid: Int,
+        inputs: [JSONScalar] = []
+    ) async throws {
         let json = try await call(session, path: "/miotspec/action", payload: [
             "params": [
                 "did": did,
                 "siid": siid,
                 "aiid": aiid,
-                "in": [Any](),
+                "in": inputs.map(\.jsonObject),
             ] as [String: Any],
         ])
         try ensureControlSucceeded(json)

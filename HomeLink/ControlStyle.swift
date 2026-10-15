@@ -293,6 +293,85 @@ struct ControlTile: View {
     }
 }
 
+/// 扫地机页底部那两颗大按钮（基座 / 开始清洁），米家是两张白卡并排。
+struct BigActionButton: View {
+    var title: String
+    var caption: String?
+    var symbol: String
+    var tint: Color
+    var highlighted = false
+    var enabled = true
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(highlighted ? Color.white : tint)
+                    .frame(width: 40, height: 40)
+                    .background(
+                        highlighted ? Color.white.opacity(0.22) : tint.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(highlighted ? Color.white : Color.primary)
+                    if let caption {
+                        Text(caption)
+                            .font(.caption)
+                            .foregroundStyle(highlighted ? Color.white.opacity(0.8) : Color.secondary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity)
+            .background(highlighted ? tint : Color.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(Color.primary.opacity(highlighted ? 0 : 0.06), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.04), radius: 8, y: 3)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.55)
+    }
+}
+
+/// 「区域 全屋 ›」这种一行，点开去设置。扫地机页的区域、模式就是它。
+struct SettingRow: View {
+    var title: String
+    var value: String
+    var enabled = true
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.primary)
+                    Text(value)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.55)
+    }
+}
+
 /// 只读的读数瓦片，用在「实时数据」里。
 struct ReadoutTile: View {
     var title: String
@@ -564,6 +643,38 @@ enum ControlIcon {
         "oven": "oven.fill",
         "microwave": "microwave.fill",
         "vacuum": "robotic.vacuum.fill",
+        "robot": "robotic.vacuum.fill",
+        "sweep": "sparkles",
+        "sweep-mop-type": "drop.fill",
+        "sweep-mop-status": "sparkles",
+        "sweep-type": "square.grid.3x3.fill",
+        "suction-level": "fan.fill",
+        "mop-water-output-level": "drop.fill",
+        "mop-wash-left-time": "timer",
+        "mop-life-level": "drop.fill",
+        "dust-arrest-left-time": "timer",
+        "dust-bag-life-level": "bag.fill",
+        "dust-bag-left-time": "timer",
+        "carpet-boost": "square.grid.2x2",
+        "sweep-ai-detection": "eye",
+        "auto-dust-arrest": "arrow.down.circle.fill",
+        "auto-mop-dry": "wind",
+        "dry-left-time": "timer",
+        "drying-time": "wind",
+        "cleaning-progress": "gauge.with.dots.needle.50percent",
+        "statistical-clean-area": "square.dashed",
+        "statistical-cleaning-duration": "clock.fill",
+        "statistical-cleaning-times": "number",
+        "last-clean-time": "clock.arrow.circlepath",
+        "base-station-working-status": "house.fill",
+        "cleaning-area": "square.dashed",
+        "cleaning-time": "clock.fill",
+        "room-information": "square.grid.3x3.fill",
+        "water-tank-status": "drop.fill",
+        "water-tank-level": "drop.fill",
+        "charge-progress": "bolt.fill",
+        "charging-state": "bolt.fill",
+        "battery-level": "battery.100",
         "cooker": "cooktop.fill",
         "dryer-machine": "dryer.fill",
         "dishwasher": "dishwasher.fill",

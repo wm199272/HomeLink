@@ -228,9 +228,9 @@ final class AppModel {
         }
     }
 
-    func runAction(device: IoTDevice, siid: Int, aiid: Int) async throws {
+    func runAction(device: IoTDevice, siid: Int, aiid: Int, inputs: [JSONScalar] = []) async throws {
         guard let session = account(for: device)?.xiaomi else { throw XiaomiError.sessionExpired }
-        try await xiaomi.runAction(session: session, did: device.did, siid: siid, aiid: aiid)
+        try await xiaomi.runAction(session: session, did: device.did, siid: siid, aiid: aiid, inputs: inputs)
     }
 
     func readGree(_ device: IoTDevice) async throws -> GreeClimate {
