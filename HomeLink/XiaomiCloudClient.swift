@@ -792,6 +792,19 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         var roomId: String?
     }
 
+    /// 别人单独分享给我的设备，带上分享人的昵称，用来分组。
+    private struct SharedDevice {
+        var device: ParsedDevice
+        var ownerName: String
+    }
+
+    /// 全量设备索引里的一条。`owner` 有值且不是自己，就说明这台设备是别人分享的。
+    private struct DeviceEntry {
+        var device: ParsedDevice
+        var ownerId: String?
+        var ownerName: String?
+    }
+
     private func fetchStructured(account: LinkedAccount, session: XiaomiSession) async throws -> [IoTHome] {
         let json = try await call(session, path: "/v2/homeroom/gethome", payload: [
             "fg": true,
@@ -802,20 +815,144 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         ])
         let result = json["result"] as? [String: Any] ?? [:]
         var refs = parseHomeList(result["homelist"], session: session)
+        // gethome 自己就会带上共享家庭；get_device_cnt 是另一条能拿到同样信息的接口。
+        // 两个都读，谁先给到都不至于漏。
         let known = Set(refs.map(\.id))
-        refs.append(contentsOf: await sharedHomes(session: session, existing: known))
+        refs.append(contentsOf: parseSharedHomes(result["share_home_list"], session: session, existing: Set(refs.map(\.id))))
+        refs.append(contentsOf: await sharedHomes(session: session, existing: known.union(refs.map(\.id))))
+
+        // 全量设备索引：device_list_page 是唯一能列出「别人单独分享的设备」的接口，
+        // 顺便还能给那些列不出设备的共享家庭兜底。
+        let index = await deviceListPageIndex(session: session)
+
         var homes: [IoTHome] = []
         for ref in refs {
             do {
-                let listed = try await deviceList(session: session, home: ref)
+                var listed = try await deviceList(session: session, home: ref)
+                if listed.devices.isEmpty {
+                    // 共享家庭常见的情况：能拿到家庭和房间，但列设备这一步被服务器拒绝或返回空。
+                    // 家庭信息里带着 dids，用全量索引补回来，免得显示成一个空家庭。
+                    let filled = devicesForRooms(ref: listed.home, index: index)
+                    if !filled.isEmpty {
+                        dlog("分享设备：「\(listed.home.name)」列不出设备，用全量索引补上 \(filled.count) 台")
+                        listed.devices = filled
+                    }
+                }
                 homes.append(makeHome(account: account, ref: listed.home, devices: listed.devices))
             } catch XiaomiError.sessionExpired {
                 throw XiaomiError.sessionExpired
             } catch {
-                homes.append(makeHome(account: account, ref: ref, devices: []))
+                let filled = devicesForRooms(ref: ref, index: index)
+                homes.append(makeHome(account: account, ref: ref, devices: filled))
             }
         }
+        // 别人「单独分享」给我的设备不属于任何一个家庭，只能从 device_list_page 拿。
+        // 已经在上面的家庭里出现过的 did 要排掉，避免同一台设备出现两次。
+        let seen = Set(homes.flatMap(\.devices).map(\.did))
+        let shared = separatedShared(index: index, session: session, excluding: seen)
+        if let home = makeSharedHome(account: account, devices: shared) {
+            homes.append(home)
+        }
         return homes
+    }
+
+    /// 拉一份全量设备索引。
+    ///
+    /// 米家里「共享设备」和「共享家庭」是两回事：共享家庭出现在 homelist /
+    /// share_home_list 里，走 home_device_list 就能列出设备；而别人**单独分享的一台设备**
+    /// 不属于任何家庭，只出现在 `/v2/home/device_list_page` 的返回里，
+    /// 判断依据是这台设备的 `owner` 带上了分享人的 `userid` 和 `nickname`。
+    /// 以前只处理了共享家庭，所以这类设备一直看不到。
+    private func deviceListPageIndex(session: XiaomiSession) async -> [String: DeviceEntry] {
+        var index: [String: DeviceEntry] = [:]
+        var startDID: String?
+        var page = 0
+        // 每页 200，最多翻 20 页，防止 has_more 一直为真时死循环。
+        while page < 20 {
+            page += 1
+            var payload: [String: Any] = [
+                "limit": 200,
+                "get_split_device": true,
+                "get_third_device": true,
+                "dids": [Any](),
+            ]
+            if let startDID { payload["start_did"] = startDID }
+            guard let json = try? await call(session, path: "/v2/home/device_list_page", payload: payload) else {
+                dlog("全量设备：device_list_page 第 \(page) 页失败")
+                break
+            }
+            let result = json["result"] as? [String: Any] ?? [:]
+            for item in (result["list"] as? [Any]) ?? [] {
+                guard let row = item as? [String: Any], let device = parseDevice(row) else { continue }
+                let owner = row["owner"] as? [String: Any]
+                let ownerId = owner.flatMap { jsonString($0["userid"]) }.flatMap { $0.isEmpty ? nil : $0 }
+                let ownerName = owner.flatMap { ($0["nickname"] as? String) }.flatMap { $0.isEmpty ? nil : $0 }
+                index[device.did] = DeviceEntry(device: device, ownerId: ownerId, ownerName: ownerName)
+            }
+            let hasMore = (result["has_more"] as? Bool) ?? false
+            guard hasMore, let next = jsonString(result["next_start_did"]), !next.isEmpty else { break }
+            startDID = next
+        }
+        dlog("全量设备：拿到 \(index.count) 台（含自己家和其他人分享的）")
+        return index
+    }
+
+    /// 按家庭信息里的 dids，从全量索引里把设备挑出来。
+    private func devicesForRooms(ref: HomeRef, index: [String: DeviceEntry]) -> [ParsedDevice] {
+        var output: [ParsedDevice] = []
+        var taken = Set<String>()
+        for room in ref.rooms {
+            for did in room.dids where !taken.contains(did) {
+                guard let entry = index[did] else { continue }
+                taken.insert(did)
+                var device = entry.device
+                if device.roomId == nil { device.roomId = room.id }
+                output.append(device)
+            }
+        }
+        return output
+    }
+
+    /// 从全量索引里挑出别人分享给我的设备（按分享人分组用）。
+    private func separatedShared(index: [String: DeviceEntry], session: XiaomiSession, excluding seen: Set<String>) -> [SharedDevice] {
+        var output: [SharedDevice] = []
+        for (did, entry) in index {
+            // owner 是自己说明是自家设备，家庭那条路已经列过了。
+            guard let ownerId = entry.ownerId, ownerId != session.userId,
+                  let ownerName = entry.ownerName,
+                  !seen.contains(did) else { continue }
+            output.append(SharedDevice(device: entry.device, ownerName: ownerName))
+        }
+        // 字典遍历顺序不稳定，排一下，让展示顺序每次一致。
+        output.sort { lhs, rhs in
+            if lhs.ownerName != rhs.ownerName {
+                return lhs.ownerName.localizedStandardCompare(rhs.ownerName) == .orderedAscending
+            }
+            return lhs.device.name.localizedStandardCompare(rhs.device.name) == .orderedAscending
+        }
+        if output.isEmpty {
+            dlog("分享设备：没有别人单独分享的设备")
+        } else {
+            let owners = Set(output.map(\.ownerName)).sorted()
+            dlog("分享设备：拿到 \(output.count) 台别人单独分享的设备，来自 \(owners.count) 个人：[\(owners.joined(separator: ","))]")
+        }
+        return output
+    }
+
+    /// 把别人分享的设备聚成一个「分享给我的」家庭，按分享人分房间。
+    private func makeSharedHome(account: LinkedAccount, devices: [SharedDevice]) -> IoTHome? {
+        guard !devices.isEmpty else { return nil }
+        var order: [String] = []
+        var grouped: [String: [ParsedDevice]] = [:]
+        for item in devices {
+            if grouped[item.ownerName] == nil { order.append(item.ownerName) }
+            grouped[item.ownerName, default: []].append(item.device)
+        }
+        let rooms = order.map { name in
+            RoomRef(id: "shared:\(name)", name: name, dids: (grouped[name] ?? []).map(\.did))
+        }
+        let ref = HomeRef(id: "shared-devices", name: "分享给我的", owner: account.xiaomi?.userId ?? "", rooms: rooms)
+        return makeHome(account: account, ref: ref, devices: devices.map(\.device))
     }
 
     private func fetchLegacy(account: LinkedAccount, session: XiaomiSession) async throws -> IoTHome {
@@ -836,28 +973,49 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
 
     private func deviceList(session: XiaomiSession, home: HomeRef) async throws -> (home: HomeRef, devices: [ParsedDevice]) {
-        let json = try await call(session, path: "/v2/home/home_device_list", payload: [
-            "home_owner": numberOrString(home.owner),
-            "home_id": numberOrString(home.id),
-            "limit": 200,
-            "get_split_device": true,
-            "support_smart_home": true,
-        ])
         var updated = home
-        let result = json["result"] as? [String: Any] ?? [:]
-        if let info = result["home_info"] as? [String: Any] {
-            let rooms = parseRooms(info["roomlist"])
-            if !rooms.isEmpty {
-                updated.rooms = rooms
+        var devices: [ParsedDevice] = []
+        var startDID: String?
+        var page = 0
+        var appliedHomeInfo = false
+        // 家庭设备可能超过一页（limit 200），要按 has_more 继续翻，
+        // 否则设备多的家庭会静默少列一部分。
+        while page < 20 {
+            page += 1
+            var payload: [String: Any] = [
+                "home_owner": numberOrString(home.owner),
+                "home_id": numberOrString(home.id),
+                "limit": 200,
+                "get_split_device": true,
+                "support_smart_home": true,
+                // 打开后能一并列出接入米家的第三方设备。
+                "get_third_device": true,
+            ]
+            if let startDID { payload["start_did"] = startDID }
+            let json = try await call(session, path: "/v2/home/home_device_list", payload: payload)
+            let result = json["result"] as? [String: Any] ?? [:]
+            if !appliedHomeInfo {
+                appliedHomeInfo = true
+                if let info = result["home_info"] as? [String: Any] {
+                    let rooms = parseRooms(info["roomlist"])
+                    if !rooms.isEmpty {
+                        updated.rooms = rooms
+                    }
+                    if let name = info["name"] as? String, !name.isEmpty {
+                        updated.name = name
+                    }
+                }
             }
-            if let name = info["name"] as? String, !name.isEmpty {
-                updated.name = name
-            }
-        }
-        let raw = (result["device_info"] as? [Any]) ?? (result["list"] as? [Any]) ?? []
-        let devices = raw.compactMap { item -> ParsedDevice? in
-            guard let row = item as? [String: Any] else { return nil }
-            return parseDevice(row)
+            let raw = (result["device_info"] as? [Any]) ?? (result["list"] as? [Any]) ?? []
+            devices.append(contentsOf: raw.compactMap { item -> ParsedDevice? in
+                guard let row = item as? [String: Any] else { return nil }
+                return parseDevice(row)
+            })
+            let hasMore = (result["has_more"] as? Bool) ?? false
+            // 翻页游标各接口叫法不同，两个都认。
+            let cursor = jsonString(result["next_start_did"]) ?? jsonString(result["max_did"]) ?? ""
+            guard hasMore, !cursor.isEmpty else { break }
+            startDID = cursor
         }
         return (updated, devices)
     }
@@ -894,6 +1052,28 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
             let owner = shareFlag == 0 ? session.userId : uid
             return HomeRef(id: id, name: name, owner: owner, rooms: parseRooms(row["roomlist"]))
         }
+    }
+
+    /// gethome 返回里的共享家庭（`share_home_list`）。
+    ///
+    /// 各家实现用的字段名不一致：官方 HA 集成读的是 `share_home_list`，
+    /// 也有实现读 `share_family`（见 `sharedHomes`）。两条路都留着更稳。
+    private func parseSharedHomes(_ raw: Any?, session: XiaomiSession, existing: Set<String>) -> [HomeRef] {
+        guard let list = raw as? [Any] else { return [] }
+        var refs: [HomeRef] = []
+        var ids = existing
+        for item in list {
+            guard let row = item as? [String: Any] else { continue }
+            let id = jsonString(row["home_id"]) ?? jsonString(row["id"]) ?? ""
+            guard !id.isEmpty, !ids.contains(id) else { continue }
+            ids.insert(id)
+            let name = (row["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? (row["home_name"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                ?? "共享家庭"
+            let owner = jsonString(row["home_owner"]) ?? jsonString(row["uid"]) ?? session.userId
+            refs.append(HomeRef(id: id, name: name, owner: owner, rooms: parseRooms(row["roomlist"])))
+        }
+        return refs
     }
 
     private func parseRooms(_ raw: Any?) -> [RoomRef] {
