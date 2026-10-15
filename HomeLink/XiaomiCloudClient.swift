@@ -155,7 +155,11 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         if let early = try await loginStep1() {
             return early
         }
-        let json = try await postAuth(captcha: nil)
+        var json = try await postAuth(captcha: nil)
+        // 如果服务器要求验证码但没返回验证码地址，重试一次拿新的验证码
+        if jsonInt(json["code"]) == 87001 && (jsonString(json["captchaUrl"]) ?? "").isEmpty {
+            json = try await postAuth(captcha: nil)
+        }
         return try await interpret(json)
     }
 
