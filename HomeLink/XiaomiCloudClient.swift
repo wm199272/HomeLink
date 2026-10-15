@@ -27,6 +27,15 @@ struct PropReading: Sendable {
 /// 登录过程直接访问 account.xiaomi.com / api.io.mi.com，密码只留在内存里用来换会话。
 final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     private let cookies: HTTPCookieStorage
+    /// 自己的 cookie 表，作为读取兜底。
+    ///
+    /// 之前用 `HTTPCookieStorage()` 自己 new 了一个实例，那样拿到的不是有效的存储后端，
+    /// `setCookie` 写进去的 cookie 会直接消失（诊断日志里每次吸收后都是 `[无]`、
+    /// `cookie("serviceToken")` 永远是 nil），网页登录因此永远凑不齐会话。
+    /// 现在改用 `shared`，同时把 name→value 也记一份在本地表里，读取时不依赖系统存储。
+    /// 这张表会被网页回调（主线程）和登录任务同时访问，所以用锁保护。
+    private let jarLock = NSLock()
+    private var jarStorage: [String: String] = [:]
     private var session: URLSession!
     private let lock = NSLock()
     private var followRedirects = true
@@ -48,7 +57,7 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     private var twoFactorFlag = 8
 
     override init() {
-        cookies = HTTPCookieStorage()
+        cookies = HTTPCookieStorage.shared
         cookies.cookieAcceptPolicy = .always
         super.init()
         let configuration = URLSessionConfiguration.ephemeral
@@ -567,6 +576,7 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         guard !list.isEmpty else { return }
         for item in list {
             cookies.setCookie(item)
+            jarSet(item.name, item.value)
         }
         if userId == nil, let uid = cookie("userId"), !uid.isEmpty {
             userId = uid
@@ -577,7 +587,7 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         if serviceToken == nil, let token = cookie("serviceToken"), !token.isEmpty {
             serviceToken = token
         }
-        dlog("吸收网页 cookie：[\(cookieNameList(list))] 合并后=[\(cookieNames())] 缺：\(sessionMissing())")
+        dlog("吸收网页 cookie：[\(cookieNameList(list))] 本地表=[\(jarNames())] 系统存储=[\(cookieNames())] 缺：\(sessionMissing())")
     }
 
     /// 还缺哪些凭证，用来快速判断卡在哪一步。
@@ -626,6 +636,12 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         cookieNameList(cookies.cookies ?? [])
     }
 
+    /// 本地表里有哪些 cookie 名字。
+    private func jarNames() -> String {
+        let names = Set(jarAll().keys).sorted()
+        return names.isEmpty ? "无" : names.joined(separator: ",")
+    }
+
     private func absorb(_ json: [String: Any]) {
         if let secret = jsonString(json["ssecurity"]), secret.count > 4 {
             ssecurity = secret
@@ -654,7 +670,14 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
 
     private func resetSession() {
-        cookies.cookies?.forEach { cookies.deleteCookie($0) }
+        // 存储换成了全局的 HTTPCookieStorage.shared，所以只能删小米相关的 cookie；
+        // 直接全清会把其它平台（它们用 URLSession.shared）的会话一起干掉。
+        let ours = (cookies.cookies ?? []).filter {
+            let domain = $0.domain.lowercased()
+            return domain.contains("xiaomi.com") || domain.contains("mi.com")
+        }
+        for item in ours { cookies.deleteCookie(item) }
+        jarClear()
         agent = XiaomiCrypto.randomAgent()
         deviceId = XiaomiCrypto.randomDeviceID()
         sign = nil
@@ -1030,7 +1053,24 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         lock.unlock()
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw XiaomiError.invalidResponse }
+        captureSetCookie(http)
         return (data, http)
+    }
+
+    /// 把响应里的 Set-Cookie 也记进本地表。
+    ///
+    /// 换米家凭证时 serviceToken 是靠 `sts` 的响应头下来的，记一份就不必完全依赖
+    /// 系统 cookie 存储的行为（URLSession 自己也会存，这里是双保险）。
+    private func captureSetCookie(_ http: HTTPURLResponse) {
+        for (key, value) in http.allHeaderFields {
+            guard let name = key as? String, name.lowercased() == "set-cookie" else { continue }
+            for piece in "\(value)".components(separatedBy: ",") {
+                let first = piece.split(separator: ";").first.map(String.init) ?? ""
+                let parts = first.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else { continue }
+                jarSet(parts[0], parts[1])
+            }
+        }
     }
 
     private func getRaw(_ urlString: String, follow: Bool) async throws -> (Data, HTTPURLResponse) {
@@ -1063,11 +1103,39 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         return object
     }
 
+    /// 本地表的读写入口，统一加锁。
+    private func jarSet(_ name: String, _ value: String) {
+        jarLock.lock()
+        jarStorage[name] = value
+        jarLock.unlock()
+    }
+
+    private func jarGet(_ name: String) -> String? {
+        jarLock.lock()
+        defer { jarLock.unlock() }
+        return jarStorage[name]
+    }
+
+    private func jarAll() -> [String: String] {
+        jarLock.lock()
+        defer { jarLock.unlock() }
+        return jarStorage
+    }
+
+    private func jarClear() {
+        jarLock.lock()
+        jarStorage.removeAll()
+        jarLock.unlock()
+    }
+
     private func cookie(_ name: String) -> String? {
-        cookies.cookies?.last(where: { $0.name == name })?.value
+        // 先看本地表：不依赖系统存储的实现细节，网页 cookie 一定读得到。
+        if let value = jarGet(name), !value.isEmpty { return value }
+        return cookies.cookies?.last(where: { $0.name == name })?.value
     }
 
     private func setCookie(_ name: String, _ value: String, domain: String) {
+        jarSet(name, value)
         let properties: [HTTPCookiePropertyKey: Any] = [
             .domain: domain,
             .path: "/",
