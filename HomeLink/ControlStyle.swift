@@ -528,6 +528,9 @@ func cloudNote(_ platform: PlatformKind) -> String? {
 }
 
 /// 属性名到图标的对照。认不出来的给个通用图标，绝不会因为名字没收录就空着。
+///
+/// **键不能重复。** Swift 的字典字面量遇到重复键会直接 `fatalError`，
+/// 详情页第一次画瓦片就会闪退。
 enum ControlIcon {
     static func symbol(for identifier: String) -> String {
         if let hit = table[identifier] { return hit }
@@ -673,8 +676,6 @@ enum ControlIcon {
         "water-tank-status": "drop.fill",
         "water-tank-level": "drop.fill",
         "charge-progress": "bolt.fill",
-        "charging-state": "bolt.fill",
-        "battery-level": "battery.100",
         "cooker": "cooktop.fill",
         "dryer-machine": "dryer.fill",
         "dishwasher": "dishwasher.fill",
