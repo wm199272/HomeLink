@@ -166,7 +166,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "家联";
+				INFOPLIST_KEY_CFBundleDisplayName = HomeLink;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "家联会连接你身边的 Jbotsports 发球机。";
 				INFOPLIST_KEY_NSHomeKitUsageDescription = "家联会读取并控制你已经添加到“家庭”的设备。";
@@ -206,7 +206,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "家联";
+				INFOPLIST_KEY_CFBundleDisplayName = HomeLink;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.lifestyle";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "家联会连接你身边的 Jbotsports 发球机。";
 				INFOPLIST_KEY_NSHomeKitUsageDescription = "家联会读取并控制你已经添加到“家庭”的设备。";

@@ -15,7 +15,7 @@ struct PlatformSelectView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 22) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("家联")
+                    Text("HomeLink")
                         .font(.system(size: 40, weight: .semibold))
                     Text("选择要关联的平台。关联之后，可以查看并控制该账号里的设备。")
                         .font(.body)
