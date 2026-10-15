@@ -37,7 +37,7 @@ struct XiaomiWebLoginView: View {
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.secondary)
                         if waitedSeconds >= 15 {
-                            Text("已经等了 \(waitedSeconds) 秒。如果一直停在这里，点左上角「关闭」回到关联页，展开下面的「诊断信息」复制发我；也可以改用「账号密码」方式登录。")
+                            Text("已经等了 \(waitedSeconds) 秒。如果一直停在这里，点左上角「关闭」回到关联页，展开下面的「诊断信息」复制发我。")
                                 .font(.caption2)
                                 .multilineTextAlignment(.center)
                                 .foregroundStyle(.secondary)

@@ -15,6 +15,11 @@ final class AppModel {
     var lastError: String?
     var linkGeneration = 0
     var didBootstrap = false
+    /// 「全部设备」页里用户自己置顶的设备，数组顺序就是展示顺序。
+    /// 只存设备 id：设备每次同步都会重建，存整个设备快照会立刻过期。
+    /// 只通过 `togglePin` / `movePinned` 改动，改完会立刻落盘。
+    var pinnedDeviceIDs: [String] = []
+    private static let pinnedKey = "pinned-devices"
 
     private let store = AccountStore()
     private let xiaomi = XiaomiCloudClient()
@@ -26,6 +31,7 @@ final class AppModel {
         accounts = store.loadAccounts()
         homes = store.loadHomes()
         selectedHomeID = UserDefaults.standard.string(forKey: "selected-home")
+        pinnedDeviceIDs = UserDefaults.standard.stringArray(forKey: AppModel.pinnedKey) ?? []
         ensureSelection()
         if accounts.contains(where: { $0.platform == .homekit }) {
             activateHomeKit()
@@ -301,6 +307,47 @@ final class AppModel {
 
     func deviceCount(for accountId: UUID) -> Int {
         homes.filter { $0.accountId == accountId }.reduce(0) { $0 + $1.devices.count }
+    }
+
+    // MARK: 置顶
+
+    func isPinned(_ deviceID: String) -> Bool {
+        pinnedDeviceIDs.contains(deviceID)
+    }
+
+    func togglePin(_ deviceID: String) {
+        if let index = pinnedDeviceIDs.firstIndex(of: deviceID) {
+            pinnedDeviceIDs.remove(at: index)
+        } else {
+            pinnedDeviceIDs.append(deviceID)
+        }
+        savePins()
+    }
+
+    /// 拖动置顶设备之后把新的相对顺序写回去。
+    /// - Parameter visible: 当前屏幕上可见的置顶设备（搜索会滤掉一部分），
+    ///   `source` / `destination` 都是相对它的下标，所以不能直接改整个数组。
+    func movePinned(fromOffsets source: IndexSet, toOffset destination: Int, visible: [String]) {
+        var reordered = visible
+        reordered.move(fromOffsets: source, toOffset: destination)
+        guard reordered != visible else { return }
+        // 把可见这几个位置按新顺序换掉，其余（被搜索滤掉的）留在原位。
+        let visibleSet = Set(visible)
+        var remaining = reordered.makeIterator()
+        var next: [String] = []
+        for id in pinnedDeviceIDs {
+            if visibleSet.contains(id) {
+                if let replacement = remaining.next() { next.append(replacement) }
+            } else {
+                next.append(id)
+            }
+        }
+        pinnedDeviceIDs = next
+        savePins()
+    }
+
+    private func savePins() {
+        UserDefaults.standard.set(pinnedDeviceIDs, forKey: AppModel.pinnedKey)
     }
 
     private func loadPowerStates() async {
