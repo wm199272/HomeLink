@@ -108,12 +108,30 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
             throw XiaomiError.failed("没有拿到登录二维码")
         }
         longPollURL = lpURL
-        let timeout = jsonDouble(json["timeout"]) ?? 180
-        let seconds = timeout > 1_000 ? timeout / 1_000 : timeout
-        qrDeadline = Date().addingTimeInterval(min(max(seconds, 30), 300))
+        qrDeadline = Date().addingTimeInterval(Self.qrWindow(from: jsonDouble(json["timeout"])))
         let image = try await download(absoluteAccountURL(qr))
         let loginURL = (json["loginUrl"] as? String).flatMap(URL.init(string:))
         return QRTicket(image: image, loginURL: loginURL, deadline: qrDeadline)
+    }
+
+    /// 把服务端返回的 timeout 换算成可用的秒数。timeout 有时是毫秒，有时是秒，
+    /// 个别情况下还会缺失或不是数字；一旦算出 NaN，有效期就变成非法时间，
+    /// 轮询循环会一次都不执行、二维码刚显示就被判过期，所以这里必须兜底。
+    private static func qrWindow(from raw: Double?) -> TimeInterval {
+        guard let raw, raw.isFinite, raw > 0 else { return 180 }
+        let seconds = raw > 1_000 ? raw / 1_000 : raw
+        return min(max(seconds, 90), 900)
+    }
+
+    /// 二维码还在有效期内、可以继续轮询。
+    var hasActiveQR: Bool {
+        longPollURL != nil && Date() < qrDeadline
+    }
+
+    /// App 被系统挂起在后台的这段时间不该算进二维码有效期，回到前台时补上。
+    func extendQRDeadline(by seconds: TimeInterval) {
+        guard seconds > 0, seconds.isFinite else { return }
+        qrDeadline = qrDeadline.addingTimeInterval(min(seconds, 1_800))
     }
 
     func waitForQR() async throws -> XiaomiSession {
@@ -123,12 +141,19 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         while Date() < qrDeadline {
             try Task.checkCancellation()
             var request = URLRequest(url: url)
-            request.timeoutInterval = 20
+            request.timeoutInterval = 25
             request.setValue(agent, forHTTPHeaderField: "User-Agent")
             do {
                 let (data, http) = try await send(request, followRedirects: true)
-                guard http.statusCode == 200, let json = try? parse(data) else { continue }
-                guard jsonString(json["ssecurity"]) != nil else { continue }
+                guard http.statusCode == 200, let json = try? parse(data) else {
+                    // 长轮询偶尔会返回空响应或非 200，歇一下再问，别贴着服务器打转。
+                    try await Task.sleep(nanoseconds: 400_000_000)
+                    continue
+                }
+                guard jsonString(json["ssecurity"]) != nil else {
+                    try await Task.sleep(nanoseconds: 400_000_000)
+                    continue
+                }
                 absorb(json)
                 if let location = jsonString(json["location"]) {
                     try await exchange(location: location)
@@ -139,11 +164,15 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
                 return session
             } catch is CancellationError {
                 throw CancellationError()
-            } catch let error as URLError where error.code == .timedOut {
+            } catch let error as URLError {
+                // 去米家扫码、去浏览器确认都会让 App 被挂起，连接被系统掐断属于正常现象；
+                // 只要还在有效期内就继续轮询，不要把用户直接赶回「二维码已过期」。
+                if error.code == .cancelled { throw CancellationError() }
+                try await Task.sleep(nanoseconds: 500_000_000)
                 continue
             }
         }
-        throw XiaomiError.failed("二维码已过期，请刷新后再试")
+        throw XiaomiError.qrExpired
     }
 
     func beginPasswordLogin(region: String, username: String, password: String) async throws -> LoginChallenge {

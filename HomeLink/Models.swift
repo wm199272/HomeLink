@@ -564,6 +564,7 @@ enum XiaomiError: LocalizedError {
     case invalidResponse
     case failed(String)
     case sessionExpired
+    case qrExpired
 
     var errorDescription: String? {
         switch self {
@@ -573,6 +574,8 @@ enum XiaomiError: LocalizedError {
             message
         case .sessionExpired:
             "小米登录已过期，请在「平台」里重新关联"
+        case .qrExpired:
+            "二维码已过期，请刷新后再试"
         }
     }
 }
