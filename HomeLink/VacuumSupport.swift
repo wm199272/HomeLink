@@ -312,7 +312,9 @@ struct VacuumRoles {
             return nil
         }
 
-        status = pick(["status"], services: ["vacuum"]) ?? pick(["status"])
+        // 只认 vacuum 服务上的 status。别的服务也有同名列（电池、通用设备），
+        // 数字含义完全不同，拿来判断会不会在扫会把待机当成工作中。
+        status = pick(["status"], services: ["vacuum"])
         sweepStatus = pick(["sweep-mop-status"])
         fault = pick(["fault"])
         sweepMopType = pick(["sweep-mop-type"])

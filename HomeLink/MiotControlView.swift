@@ -194,35 +194,39 @@ struct MiotControlView: View {
         }
     }
 
-    /// 基座打开集尘 / 洗拖布 / 烘干；旁边是开始、暂停、停止。
+    /// 开始、暂停、停止始终分开摆，不再用「是否在扫」把开始藏掉。
     @ViewBuilder
     private func vacuumActions(_ vacuum: VacuumRoles) -> some View {
         let running = vacuumIsRunning(vacuum)
         VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                if hasStationActions(vacuum) {
-                    BigActionButton(
-                        title: "基座",
-                        caption: "集尘 · 洗拖布 · 烘干",
-                        symbol: "house.fill",
-                        tint: Color.secondary,
-                        enabled: canControl
-                    ) {
-                        sheet = .station
-                    }
-                }
+            if hasStationActions(vacuum) {
                 BigActionButton(
-                    title: running ? "暂停" : "开始清洁",
-                    symbol: running ? "pause.fill" : "play.fill",
+                    title: "基座",
+                    caption: "集尘 · 洗拖布 · 烘干",
+                    symbol: "house.fill",
+                    tint: Color.secondary,
+                    enabled: canControl
+                ) {
+                    sheet = .station
+                }
+            }
+            HStack(spacing: 12) {
+                BigActionButton(
+                    title: vacuumIsPaused(vacuum) ? "继续清洁" : "开始清洁",
+                    symbol: "play.fill",
                     tint: ControlPalette.cool,
                     highlighted: !running,
-                    enabled: canControl && (running ? vacuum.pause != nil || vacuum.stop != nil : vacuum.start != nil || vacuum.on != nil)
+                    enabled: canControl && (vacuum.start != nil || vacuum.resume != nil || vacuum.on != nil)
                 ) {
-                    if running {
-                        sendVacuumAction(vacuum.pause ?? vacuum.stop, "已暂停")
-                    } else {
-                        startVacuumCleaning(vacuum)
-                    }
+                    startVacuumCleaning(vacuum)
+                }
+                BigActionButton(
+                    title: "暂停",
+                    symbol: "pause.fill",
+                    tint: Color.secondary,
+                    enabled: canControl && running && (vacuum.pause != nil || vacuum.stop != nil)
+                ) {
+                    sendVacuumAction(vacuum.pause ?? vacuum.stop, "已暂停")
                 }
             }
             if vacuum.stop != nil {
@@ -230,7 +234,7 @@ struct MiotControlView: View {
                     title: "停止清洁",
                     symbol: "stop.fill",
                     tint: Color.clay,
-                    enabled: canControl && running
+                    enabled: canControl && (running || vacuumIsPaused(vacuum))
                 ) {
                     sendVacuumAction(vacuum.stop, "已停止清洁")
                 }
@@ -714,29 +718,68 @@ struct MiotControlView: View {
     }
 
     private func vacuumStateText(_ vacuum: VacuumRoles) -> String {
-        if let ref = vacuum.sweepStatus, let value = values[ref.id], (numeric(value) ?? 0) != 0 {
-            return vacuumOption(ref, value)
-        }
-        if let ref = vacuum.status, let value = values[ref.id], let code = numeric(value), code != 1 {
-            return vacuumOption(ref, value)
-        }
+        if vacuumIsPaused(vacuum) { return "已暂停" }
         if chargingStateCode(vacuum) == 1 { return "充电中" }
+        if let label = vacuumStatusLabel(vacuum) { return label }
         if vacuumIsRunning(vacuum) { return "清扫中" }
         return "待机"
     }
 
-    private func vacuumProgress(_ vacuum: VacuumRoles) -> Double? {
-        guard let percent = numeric(current(vacuum.progress)) else { return nil }
-        guard (numeric(current(vacuum.status)) ?? 0) == 2 || (numeric(current(vacuum.sweepStatus)) ?? 0) != 0 else {
-            return nil
+    /// 看枚举文案，不看死数字。不少扫地机把「待机」标成 2，通用表里 2 却是 Busy，
+    /// 会把停着的机器当成正在扫，开始清洁就被换成暂停。
+    private func vacuumStatusLabel(_ vacuum: VacuumRoles) -> String? {
+        for ref in [vacuum.sweepStatus, vacuum.status] {
+            guard let ref, let value = values[ref.id] else { continue }
+            let title = vacuumOption(ref, value)
+            if vacuumLooksIdle(title) || vacuumLooksCharging(title) { continue }
+            if vacuumLooksCleaning(title) || vacuumLooksPaused(title) { return title }
         }
-        return min(max(percent, 0), 100)
+        return nil
     }
 
     private func vacuumIsRunning(_ vacuum: VacuumRoles) -> Bool {
-        if let code = numeric(current(vacuum.sweepStatus)), code != 0 { return true }
-        if let code = numeric(current(vacuum.status)), code == 2 { return true }
+        if chargingStateCode(vacuum) == 1 { return false }
+        if vacuumIsPaused(vacuum) { return false }
+        if let ref = vacuum.sweepStatus, let value = current(ref) {
+            let title = vacuumOption(ref, value)
+            if vacuumLooksCleaning(title) { return true }
+            if vacuumLooksIdle(title) { return false }
+            if ref.property.format == "bool" { return boolValue(value) }
+            if ref.name == "sweep-mop-status", let code = numeric(value) { return code != 0 }
+        }
+        if let ref = vacuum.status, let value = current(ref) {
+            return vacuumLooksCleaning(vacuumOption(ref, value))
+        }
         return false
+    }
+
+    private func vacuumIsPaused(_ vacuum: VacuumRoles) -> Bool {
+        for ref in [vacuum.status, vacuum.sweepStatus] {
+            guard let ref, let value = current(ref) else { continue }
+            if vacuumLooksPaused(vacuumOption(ref, value)) { return true }
+        }
+        return false
+    }
+
+    private func vacuumLooksCleaning(_ title: String) -> Bool {
+        let text = title.lowercased()
+        return ["清扫", "拖地", "扫拖", "工作", "sweep", "mop", "clean", "busy"].contains { text.contains($0) }
+            && !vacuumLooksIdle(title) && !vacuumLooksPaused(title) && !vacuumLooksCharging(title)
+    }
+
+    private func vacuumLooksPaused(_ title: String) -> Bool {
+        let text = title.lowercased()
+        return text.contains("暂停") || text.contains("pause")
+    }
+
+    private func vacuumLooksIdle(_ title: String) -> Bool {
+        let text = title.lowercased()
+        return ["待机", "空闲", "休眠", "idle", "sleep", "wait"].contains { text.contains($0) }
+    }
+
+    private func vacuumLooksCharging(_ title: String) -> Bool {
+        let text = title.lowercased()
+        return ["充电", "回充", "charge", "dock", "return"].contains { text.contains($0) }
     }
 
     private func chargingStateCode(_ vacuum: VacuumRoles) -> Int? {
@@ -816,15 +859,21 @@ struct MiotControlView: View {
     private func startVacuumCleaning(_ vacuum: VacuumRoles) {
         Task {
             await run {
-                if let ref = vacuum.start ?? vacuum.resume {
+                let ref: MiotActionRef?
+                if vacuumIsPaused(vacuum) {
+                    ref = vacuum.resume ?? vacuum.start
+                } else {
+                    ref = vacuum.start ?? vacuum.resume
+                }
+                if let ref {
                     try await model.runAction(device: device, siid: ref.service.iid, aiid: ref.action.iid)
-                } else if let ref = vacuum.on {
-                    try await model.setProperty(device: device, siid: ref.service.iid, piid: ref.property.iid, value: .bool(true))
+                } else if let on = vacuum.on {
+                    try await model.setProperty(device: device, siid: on.service.iid, piid: on.property.iid, value: .bool(true))
                 } else {
                     throw XiaomiError.failed("这台扫地机没有公开开始清扫的指令")
                 }
             }
-            if message == nil { message = "已开始清洁" }
+            if message == nil { message = vacuumIsPaused(vacuum) ? "已继续清洁" : "已开始清洁" }
             await refresh()
         }
     }
