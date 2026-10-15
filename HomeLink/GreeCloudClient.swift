@@ -91,16 +91,49 @@ enum GreeCloudClient {
         return (homes, keys)
     }
 
+    /// 格力+ 里能操作的列都问一遍。设备不认的列不会出现在返回里，
+    /// 所以界面只按上报出来的列显示按钮，不会给空调发它不支持的命令。
+    private static let climateColumns = [
+        "Pow", "Mod", "SetTem", "WdSpd", "TemSen",
+        "SwUpDn", "SwingLfRig", "HdHeat", "Sleep", "SwhSl", "Health",
+    ]
+
     static func readClimate(session: GreeSession, mac: String) async throws -> GreeClimate {
         guard let key = session.deviceKeys[mac] else {
             throw CloudError.failed("还没有这台空调的通信密钥，下拉同步后再试")
         }
-        let values = try await exchange(session: session, mac: mac, key: key, commands: [], query: true)
-        return GreeClimate(
+        var values: [String: Int]
+        do {
+            values = try await exchange(
+                session: session,
+                mac: mac,
+                key: key,
+                commands: [],
+                query: true,
+                columns: climateColumns
+            )
+        } catch {
+            // 少数老固件只认最基础的那几列，宽查询可能被它无视。退回窄集合再问一次，
+            // 免得为了多出来的摆风、辅热反而连开关都读不到。
+            values = try await exchange(
+                session: session,
+                mac: mac,
+                key: key,
+                commands: [],
+                query: true,
+                columns: ["Pow", "Mod", "SetTem", "WdSpd"]
+            )
+        }
+        return climate(from: values)
+    }
+
+    private static func climate(from values: [String: Int]) -> GreeClimate {
+        GreeClimate(
             power: (values["Pow"] ?? 0) != 0,
             mode: values["Mod"] ?? 0,
             temperature: values["SetTem"] ?? 26,
-            fan: values["WdSpd"] ?? 0
+            fan: values["WdSpd"] ?? 0,
+            raw: values
         )
     }
 
@@ -110,7 +143,8 @@ enum GreeCloudClient {
         power: Bool?,
         mode: Int?,
         temperature: Int?,
-        fan: Int?
+        fan: Int?,
+        flags: [String: Int] = [:]
     ) async throws {
         guard let key = session.deviceKeys[mac] else {
             throw CloudError.failed("还没有这台空调的通信密钥，下拉同步后再试")
@@ -120,6 +154,7 @@ enum GreeCloudClient {
         if let temperature { commands.append(("SetTem", temperature)) }
         if let fan { commands.append(("WdSpd", fan)) }
         if let power { commands.append(("Pow", power ? 1 : 0)) }
+        for (column, value) in flags { commands.append((column, value)) }
         guard !commands.isEmpty else { return }
         _ = try await exchange(session: session, mac: mac, key: key, commands: commands, query: false)
     }
@@ -129,7 +164,8 @@ enum GreeCloudClient {
         mac: String,
         key: String,
         commands: [(String, Int)],
-        query: Bool
+        query: Bool,
+        columns: [String] = ["Pow", "Mod", "SetTem", "WdSpd"]
     ) async throws -> [String: Int] {
         guard let uid = Int(session.userId) else { throw CloudError.failed("格力用户编号无效") }
         let mqtt = MiniMQTT(host: session.mqttHost, port: 1984)
@@ -139,7 +175,10 @@ enum GreeCloudClient {
         try await mqtt.subscribe(topic: "response/\(parent)/#")
         try await mqtt.subscribe(topic: "status/\(parent)/#")
         if query {
-            try await mqtt.publish(topic: "request/\(parent)", payload: Data(envelope(uid: uid, tcid: mac, pack: try encrypt("{\"t\": \"status\", \"cols\": [\"Pow\", \"Mod\", \"SetTem\", \"WdSpd\"]}", key: key)).utf8))
+            let list = columns.map { "\"\($0)\"" }.joined(separator: ", ")
+            let request = "{\"t\": \"status\", \"cols\": [\(list)]}"
+            let pack = try encrypt(request, key: key)
+            try await mqtt.publish(topic: "request/\(parent)", payload: Data(envelope(uid: uid, tcid: mac, pack: pack).utf8))
         }
         for command in commands {
             let inner = "{\"t\": \"cmd\", \"opt\": [\"\(command.0)\"], \"p\": [\(command.1)]}"
@@ -148,7 +187,12 @@ enum GreeCloudClient {
         }
         if !query { return [:] }
         let deadline = Date().addingTimeInterval(8)
-        while let message = try await mqtt.readPublish(until: deadline) {
+        var values: [String: Int] = [:]
+        var grace: Date?
+        while true {
+            // 空调可能把状态拆成几条发。第一条里带上 Pow 之后再多等 1.2 秒，
+            // 把摆风、辅热这些其它列一起收进来。
+            guard let message = try await mqtt.readPublish(until: grace ?? deadline) else { break }
             guard let object = try? JSONSerialization.jsonObject(with: message.1) as? [String: Any],
                   let pack = jsonString(object["pack"]) else { continue }
             let tcid = jsonString(object["tcid"]) ?? ""
@@ -157,15 +201,19 @@ enum GreeCloudClient {
                   let parsed = try? JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any],
                   let cols = parsed["cols"] as? [Any],
                   let dat = parsed["dat"] as? [Any] else { continue }
-            var values: [String: Int] = [:]
             for (index, name) in cols.enumerated() where index < dat.count {
-                if let key = jsonString(name), let value = jsonInt(dat[index]) {
-                    values[key] = value
+                if let column = jsonString(name), let value = jsonInt(dat[index]) {
+                    values[column] = value
                 }
             }
-            if values["Pow"] != nil { return values }
+            if values["Pow"] != nil, grace == nil {
+                grace = Date().addingTimeInterval(1.2)
+            }
         }
-        throw CloudError.failed("空调没有回应，确认它在格力+里在线后再试")
+        guard values["Pow"] != nil else {
+            throw CloudError.failed("空调没有回应，确认它在格力+里在线后再试")
+        }
+        return values
     }
 
     private static func readPowers(session: GreeSession, keys: [String: String]) async -> [String: Bool] {

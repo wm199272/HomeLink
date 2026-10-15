@@ -240,9 +240,24 @@ final class AppModel {
         return climate
     }
 
-    func writeGree(_ device: IoTDevice, power: Bool?, mode: Int?, temperature: Int?, fan: Int?) async throws {
+    func writeGree(
+        _ device: IoTDevice,
+        power: Bool?,
+        mode: Int?,
+        temperature: Int?,
+        fan: Int?,
+        flags: [String: Int] = [:]
+    ) async throws {
         guard let session = account(for: device)?.gree else { throw CloudError.sessionExpired("格力+") }
-        try await GreeCloudClient.writeClimate(session: session, mac: device.did, power: power, mode: mode, temperature: temperature, fan: fan)
+        try await GreeCloudClient.writeClimate(
+            session: session,
+            mac: device.did,
+            power: power,
+            mode: mode,
+            temperature: temperature,
+            fan: fan,
+            flags: flags
+        )
         if let power {
             mutate(device.id) { $0.power = power ? .on : .off }
         }

@@ -72,6 +72,56 @@ struct MiotActionInput: Decodable, Sendable {
     var piid: Int?
 }
 
+/// 带出处的属性引用：UI 层要按名字挑属性，摊平后还得知道它属于哪个服务。
+struct MiotPropertyRef: Identifiable, Sendable {
+    var service: MiotService
+    var property: MiotProperty
+
+    var id: String { "\(service.iid).\(property.iid)" }
+    var name: String { MiotNaming.identifier(property.type) }
+    var serviceName: String { MiotNaming.identifier(service.type) }
+}
+
+/// 同上，动作版本。
+struct MiotActionRef: Identifiable, Sendable {
+    var service: MiotService
+    var action: MiotAction
+
+    var id: String { "\(service.iid).\(action.iid)" }
+    var name: String { MiotNaming.identifier(action.type) }
+}
+
+extension MiotSpec {
+    /// 摆在界面上的服务和属性，摊平成一维，方便按名字找。
+    var uiServices: [MiotService] { services.filter(\.showsInUI) }
+
+    var uiProperties: [MiotPropertyRef] {
+        uiServices.flatMap { service in
+            service.properties.map { MiotPropertyRef(service: service, property: $0) }
+        }
+    }
+
+    var uiActions: [MiotActionRef] {
+        uiServices.flatMap { service in
+            service.actions.map { MiotActionRef(service: service, action: $0) }
+        }
+    }
+}
+
+extension MiotProperty {
+    /// value-range 是 [最小值, 最大值, 步进]，步进可能缺省。
+    var sliderBounds: ClosedRange<Double>? {
+        guard let valueRange, valueRange.count >= 2, valueRange[0] < valueRange[1] else { return nil }
+        return valueRange[0]...valueRange[1]
+    }
+
+    var sliderStep: Double {
+        let step = valueRange?.dropFirst(2).first ?? 1
+        if step <= 0 { return format == "float" ? 0.1 : 1 }
+        return step
+    }
+}
+
 extension MiotSpec {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)

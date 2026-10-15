@@ -1,19 +1,16 @@
 import SwiftUI
 
+/// 设备详情页的入口。
+///
+/// 米家和格力各自有专门的界面（照着米家 App、格力+ App 做）：
+/// 米家走 `MiotControlView`（按设备描述自动摆功能），格力走 `GreeControlView`。
+/// 其余平台沿用原来的列表样式。
 struct DeviceDetailView: View {
     @Environment(AppModel.self) private var model
     var deviceID: String
-    @State private var spec: MiotSpec?
-    @State private var values: [String: JSONScalar] = [:]
     @State private var traits: [HKTrait] = []
-    @State private var drafts: [String: Double] = [:]
     @State private var isLoading = false
     @State private var message: String?
-    @State private var greePower = false
-    @State private var greeMode = 0
-    @State private var greeTemp = 26.0
-    @State private var greeFan = 0
-    @State private var greeReady = false
     @State private var deyePower = false
     @State private var deyeMode = 0
     @State private var deyeHumidity = 60.0
@@ -28,7 +25,13 @@ struct DeviceDetailView: View {
     var body: some View {
         Group {
             if let device {
-                controls(for: device)
+                if device.platform == .xiaomi, device.specType != nil {
+                    MiotControlView(device: device)
+                } else if device.platform == .gree {
+                    GreeControlView(device: device)
+                } else {
+                    controls(for: device)
+                }
             } else {
                 ContentUnavailableView("设备不在列表里", systemImage: "questionmark.circle")
             }
@@ -96,31 +99,6 @@ struct DeviceDetailView: View {
                         }
                     }
                 }
-            } else if let spec {
-                ForEach(spec.services.filter(\.showsInUI)) { service in
-                    let properties = service.properties.filter(\.visible)
-                    let actions = service.actions.filter(\.canRunWithoutInput)
-                    if !properties.isEmpty || !actions.isEmpty {
-                        Section(MiotNaming.title(type: service.type, fallback: service.description)) {
-                            ForEach(properties) { property in
-                                propertyRow(device: device, service: service, property: property)
-                            }
-                            ForEach(actions) { action in
-                                Button(MiotNaming.title(type: action.type, fallback: action.description)) {
-                                    Task {
-                                        await run {
-                                            try await model.runAction(device: device, siid: service.iid, aiid: action.iid)
-                                            message = "已执行"
-                                        }
-                                    }
-                                }
-                                .disabled(!device.online)
-                            }
-                        }
-                    }
-                }
-            } else if device.platform == .gree {
-                greeControls(device)
             } else if device.platform == .qihoo {
                 qihooControls(device)
             } else if device.platform == .deye {
@@ -146,14 +124,7 @@ struct DeviceDetailView: View {
             }
 
             Section("信息") {
-                LabeledContent("平台", value: device.platform.title)
-                if !device.model.isEmpty {
-                    LabeledContent("型号", value: device.model)
-                }
-                LabeledContent("设备 ID", value: device.did)
-                if let ip = device.localIP, !ip.isEmpty {
-                    LabeledContent("局域网地址", value: ip)
-                }
+                DeviceInfoContent(device: device)
             }
         }
         .scrollContentBackground(.hidden)
@@ -166,85 +137,6 @@ struct DeviceDetailView: View {
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
             }
-        }
-    }
-
-    @ViewBuilder
-    private func greeControls(_ device: IoTDevice) -> some View {
-        Section("空调") {
-            if !greeReady {
-                Text(isLoading ? "正在读取空调" : "暂时没有读到空调状态，仍然可以在下面调节。")
-                    .foregroundStyle(.secondary)
-            }
-            Toggle("开关", isOn: Binding(
-                get: { greePower },
-                set: { newValue in
-                    let old = greePower
-                    greePower = newValue
-                    Task {
-                        await run({
-                            try await model.writeGree(device, power: newValue, mode: nil, temperature: nil, fan: nil)
-                        }, rollback: { greePower = old })
-                    }
-                }
-            ))
-            .disabled(!device.online)
-            Picker("模式", selection: Binding(
-                get: { greeMode },
-                set: { newValue in
-                    let old = greeMode
-                    greeMode = newValue
-                    Task {
-                        await run({
-                            try await model.writeGree(device, power: nil, mode: newValue, temperature: nil, fan: nil)
-                        }, rollback: { greeMode = old })
-                    }
-                }
-            )) {
-                Text("自动").tag(0)
-                Text("制冷").tag(1)
-                Text("除湿").tag(2)
-                Text("送风").tag(3)
-                Text("制热").tag(4)
-            }
-            .disabled(!device.online)
-            VStack(alignment: .leading) {
-                HStack {
-                    Text("温度")
-                    Spacer()
-                    Text("\(Int(greeTemp.rounded()))°C")
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(value: $greeTemp, in: 16...30, step: 1, onEditingChanged: { editing in
-                    guard !editing else { return }
-                    let target = Int(greeTemp.rounded())
-                    Task {
-                        await run {
-                            try await model.writeGree(device, power: nil, mode: nil, temperature: target, fan: nil)
-                        }
-                    }
-                })
-                .disabled(!device.online)
-            }
-            Picker("风速", selection: Binding(
-                get: { greeFan },
-                set: { newValue in
-                    let old = greeFan
-                    greeFan = newValue
-                    Task {
-                        await run({
-                            try await model.writeGree(device, power: nil, mode: nil, temperature: nil, fan: newValue)
-                        }, rollback: { greeFan = old })
-                    }
-                }
-            )) {
-                Text("自动").tag(0)
-                Text("低").tag(1)
-                Text("中").tag(2)
-                Text("高").tag(3)
-            }
-            .disabled(!device.online)
         }
     }
 
@@ -385,104 +277,6 @@ struct DeviceDetailView: View {
         }
     }
 
-    private func cloudNote(_ platform: PlatformKind) -> String? {
-        switch platform {
-        case .xiaomi: "开关和调节会发给小米云端，设备需要保持在线。"
-        case .gree: "调节会发给格力云端，空调需要保持在线。个别老固件只会在格力+里响应。"
-        case .qihoo: "清扫指令会发给 360 云端，设备需要保持在线。"
-        case .deye: "调节会发给德业云端，设备需要保持在线。"
-        case .midea: "开关会发给美的美居云端，设备需要保持在线。"
-        case .broad: "设备列表来自远大空气管家。各机型的开关还没有统一的公开指令。"
-        case .haier: "在线状态来自海尔智家。各机型的细项控制走设备影子，这一版先同步设备。"
-        case .mai: "记录仪列表来自 70 迈账号。远程视频走记录仪自己的点对点通道。"
-        case .jbot: "开始和停止通过蓝牙直接发给身边的发球机。"
-        default: nil
-        }
-    }
-
-    @ViewBuilder
-    private func propertyRow(device: IoTDevice, service: MiotService, property: MiotProperty) -> some View {
-        let key = "\(service.iid).\(property.iid)"
-        let title = MiotNaming.title(type: property.type, fallback: property.description)
-        let value = values[key]
-
-        if property.format == "bool", property.canWrite {
-            Toggle(title, isOn: Binding(
-                get: { boolValue(value) },
-                set: { newValue in
-                    let old = values[key]
-                    values[key] = .bool(newValue)
-Task {
-                    await run({
-                        try await model.setProperty(device: device, siid: service.iid, piid: property.iid, value: .bool(newValue))
-                    }, rollback: {
-                        values[key] = old
-                    })
-                }
-                }
-            ))
-            .disabled(!device.online)
-        } else if property.canWrite, let options = property.valueList, !options.isEmpty {
-            Picker(title, selection: Binding(
-                get: { value ?? options[0].value },
-                set: { newValue in
-                    let old = values[key]
-                    values[key] = newValue
-Task {
-                    await run({
-                        try await model.setProperty(device: device, siid: service.iid, piid: property.iid, value: newValue)
-                    }, rollback: {
-                        values[key] = old
-                    })
-                }
-                }
-            )) {
-                ForEach(Array(options.enumerated()), id: \.offset) { _, option in
-                    Text(MiotNaming.optionTitle(option.description)).tag(option.value)
-                }
-            }
-            .disabled(!device.online)
-        } else if property.canWrite, let range = sliderRange(property) {
-            VStack(alignment: .leading) {
-                HStack {
-                    Text(title)
-                    Spacer()
-                    Text(sliderText(drafts[key] ?? range.lowerBound, unit: property.unit))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-                Slider(
-                    value: Binding(
-                        get: { drafts[key] ?? numeric(value) ?? range.lowerBound },
-                        set: { drafts[key] = $0 }
-                    ),
-                    in: range,
-                    step: sliderStep(property),
-                    onEditingChanged: { editing in
-                        guard !editing else { return }
-                        let number = drafts[key] ?? numeric(value) ?? range.lowerBound
-                        let scalar = scalarValue(number, format: property.format)
-                        let old = values[key]
-                        values[key] = scalar
-                        Task {
-                            await run({
-                                try await model.setProperty(device: device, siid: service.iid, piid: property.iid, value: scalar)
-                            }, rollback: {
-                                values[key] = old
-                            })
-                        }
-                    }
-                )
-                .disabled(!device.online)
-            }
-        } else {
-            LabeledContent(title) {
-                Text(readOnlyText(value, unit: property.unit))
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
     private func load() async {
         guard let device else { return }
         isLoading = true
@@ -490,19 +284,6 @@ Task {
         defer { isLoading = false }
         if device.platform == .homekit {
             traits = await model.homeKitTraits(for: device)
-            return
-        }
-        if device.platform == .gree {
-            do {
-                let climate = try await model.readGree(device)
-                greePower = climate.power
-                greeMode = climate.mode
-                greeTemp = Double(min(30, max(16, climate.temperature)))
-                greeFan = climate.fan
-                greeReady = true
-            } catch {
-                message = humanize(error)
-            }
             return
         }
         if device.platform == .deye {
@@ -520,27 +301,6 @@ Task {
             }
             return
         }
-        if device.platform == .qihoo { return }
-        guard device.platform == .xiaomi, device.specType != nil else { return }
-        do {
-            let loaded = try await model.spec(for: device)
-            spec = loaded
-            var refs: [(siid: Int, piid: Int)] = []
-            for service in loaded.services where service.showsInUI {
-                for property in service.properties where property.visible && property.canRead {
-                    refs.append((service.iid, property.iid))
-                }
-            }
-            let readings = try await model.readProperties(device: device, refs: refs)
-            var next: [String: JSONScalar] = [:]
-            for reading in readings {
-                guard reading.code == 0 || reading.code == 1, let value = reading.value else { continue }
-                next["\(reading.siid).\(reading.piid)"] = value
-            }
-            values = next
-        } catch {
-            message = humanize(error)
-        }
     }
 
     private func run(_ work: () async throws -> Void, rollback: (() -> Void)? = nil) async {
@@ -556,48 +316,5 @@ Task {
     private func updateTrait(_ id: String, on: Bool) {
         guard let index = traits.firstIndex(where: { $0.id == id }) else { return }
         traits[index].isOn = on
-    }
-
-    private func boolValue(_ value: JSONScalar?) -> Bool {
-        switch value {
-        case let .bool(on): on
-        case let .int(number): number != 0
-        default: false
-        }
-    }
-
-    private func numeric(_ value: JSONScalar?) -> Double? {
-        switch value {
-        case let .int(number): Double(number)
-        case let .double(number): number
-        case let .bool(on): on ? 1 : 0
-        default: nil
-        }
-    }
-
-    private func sliderRange(_ property: MiotProperty) -> ClosedRange<Double>? {
-        guard let raw = property.valueRange, raw.count >= 2, raw[0] < raw[1] else { return nil }
-        return raw[0]...raw[1]
-    }
-
-    private func sliderStep(_ property: MiotProperty) -> Double {
-        let step = property.valueRange?.dropFirst(2).first ?? 1
-        if step <= 0 { return property.format == "float" ? 0.1 : 1 }
-        return step
-    }
-
-    private func scalarValue(_ number: Double, format: String) -> JSONScalar {
-        if format == "float" { return .double(number) }
-        return .int(Int(number.rounded()))
-    }
-
-    private func sliderText(_ number: Double, unit: String?) -> String {
-        let body = number.rounded() == number ? String(Int(number)) : String(format: "%.1f", number)
-        return body + MiotNaming.unitSuffix(unit)
-    }
-
-    private func readOnlyText(_ value: JSONScalar?, unit: String?) -> String {
-        guard let value else { return "—" }
-        return value.displayText + MiotNaming.unitSuffix(unit)
     }
 }

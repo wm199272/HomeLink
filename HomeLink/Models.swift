@@ -543,6 +543,8 @@ struct GreeClimate: Sendable {
     var mode: Int
     var temperature: Int
     var fan: Int
+    /// 设备这次上报的全部列，用来判断它支持哪些功能（摆风、辅热这些）。
+    var raw: [String: Int] = [:]
 }
 
 struct DeyeClimate: Sendable {
