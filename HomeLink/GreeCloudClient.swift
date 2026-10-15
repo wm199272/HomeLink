@@ -72,19 +72,36 @@ enum GreeCloudClient {
             for pair in built.keys { keys[pair.key] = pair.value }
             homes.append(built.home)
         }
-        // 暂时跳过 MQTT 读取开关状态：格力云端 MQTT 通道在部分网络上会触发崩溃，
-        // 先用 nil 开关状态保证关联和浏览不闪退，后续再单独排查 MQTT。
-        _ = keys
+        let powers = await readPowers(session: session, keys: keys)
+        homes = homes.map { home in
+            var copy = home
+            copy.rooms = home.rooms.map { room in
+                var next = room
+                next.devices = room.devices.map { device in
+                    var item = device
+                    if let on = powers[device.did] {
+                        item.power = on ? .on : .off
+                    }
+                    return item
+                }
+                return next
+            }
+            return copy
+        }
         return (homes, keys)
     }
 
     static func readClimate(session: GreeSession, mac: String) async throws -> GreeClimate {
-        // 暂时跳过 MQTT 读取：格力云端 MQTT 通道在部分网络上会触发崩溃。
-        // 先返回默认状态，保证点击设备不闪退，后续再单独排查 MQTT。
-        guard session.deviceKeys[mac] != nil else {
+        guard let key = session.deviceKeys[mac] else {
             throw CloudError.failed("还没有这台空调的通信密钥，下拉同步后再试")
         }
-        return GreeClimate(power: false, mode: 0, temperature: 26, fan: 0)
+        let values = try await exchange(session: session, mac: mac, key: key, commands: [], query: true)
+        return GreeClimate(
+            power: (values["Pow"] ?? 0) != 0,
+            mode: values["Mod"] ?? 0,
+            temperature: values["SetTem"] ?? 26,
+            fan: values["WdSpd"] ?? 0
+        )
     }
 
     static func writeClimate(
@@ -95,8 +112,16 @@ enum GreeCloudClient {
         temperature: Int?,
         fan: Int?
     ) async throws {
-        // 暂时跳过 MQTT 控制：同上，避免点击控制时闪退。
-        throw CloudError.failed("格力云端控制通道还在适配中，暂时只能查看设备")
+        guard let key = session.deviceKeys[mac] else {
+            throw CloudError.failed("还没有这台空调的通信密钥，下拉同步后再试")
+        }
+        var commands: [(String, Int)] = []
+        if let mode { commands.append(("Mod", mode)) }
+        if let temperature { commands.append(("SetTem", temperature)) }
+        if let fan { commands.append(("WdSpd", fan)) }
+        if let power { commands.append(("Pow", power ? 1 : 0)) }
+        guard !commands.isEmpty else { return }
+        _ = try await exchange(session: session, mac: mac, key: key, commands: commands, query: false)
     }
 
     private static func exchange(

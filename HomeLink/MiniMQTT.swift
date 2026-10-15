@@ -7,7 +7,6 @@ final class MiniMQTT: @unchecked Sendable {
     private let queue = DispatchQueue(label: "app.homelink.mqtt")
     private let lock = NSLock()
     private var buffer = Data()
-    private var waiter: CheckedContinuation<Void, Error>?
     private var failed: Error?
     private var ended = false
     private var reading = false
@@ -62,10 +61,7 @@ final class MiniMQTT: @unchecked Sendable {
     func close() {
         lock.lock()
         ended = true
-        let pending = waiter
-        waiter = nil
         lock.unlock()
-        pending?.resume(throwing: CancellationError())
         connection.cancel()
     }
 
@@ -110,11 +106,8 @@ final class MiniMQTT: @unchecked Sendable {
             if let error { self.failed = error }
             if isComplete { self.ended = true }
             self.reading = false
-            let pending = self.waiter
-            self.waiter = nil
             let stop = self.ended || self.failed != nil
             self.lock.unlock()
-            pending?.resume()
             if !stop {
                 self.ensureReading()
             }
@@ -126,7 +119,7 @@ final class MiniMQTT: @unchecked Sendable {
         while Date() < deadline {
             if let packet = popPacket() { return packet }
             try Task.checkCancellation()
-            try await wait(until: deadline)
+            try await Task.sleep(nanoseconds: 50_000_000)
             if let packet = popPacket() { return packet }
             lock.lock()
             let error = failed
@@ -139,29 +132,14 @@ final class MiniMQTT: @unchecked Sendable {
     }
 
     private func wait(until deadline: Date) async throws {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        // 改成轮询，不再用 CheckedContinuation，避免续体误用崩溃
+        while Date() < deadline {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 30_000_000)
             lock.lock()
-            if failed != nil || ended || packetReadyLocked() {
-                lock.unlock()
-                cont.resume()
-                return
-            }
-            waiter = cont
-            let readyNow = packetReadyLocked() || failed != nil || ended
-            if readyNow { waiter = nil }
+            let ready = packetReadyLocked() || failed != nil || ended
             lock.unlock()
-            if readyNow {
-                cont.resume()
-                return
-            }
-            queue.asyncAfter(deadline: .now() + max(0.05, deadline.timeIntervalSinceNow)) { [weak self] in
-                guard let self else { return }
-                self.lock.lock()
-                let pending = self.waiter
-                self.waiter = nil
-                self.lock.unlock()
-                pending?.resume()
-            }
+            if ready { return }
         }
     }
 
