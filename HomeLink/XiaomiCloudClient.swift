@@ -128,6 +128,17 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         longPollURL != nil && Date() < qrDeadline
     }
 
+    /// 还握着 long polling 地址。用户可能在二维码"名义过期"前一刻才确认，
+    /// 所以回到前台/手动检查时用它判断还能不能续上，而不是卡在有效期内。
+    var hasPendingQR: Bool {
+        longPollURL != nil
+    }
+
+    /// 所有凭证都齐了就直接给出会话，网页登录时可以用来跳过等待。
+    var readySession: XiaomiSession? {
+        currentSession()
+    }
+
     /// App 被系统挂起在后台的这段时间不该算进二维码有效期，回到前台时补上。
     func extendQRDeadline(by seconds: TimeInterval) {
         guard seconds > 0, seconds.isFinite else { return }
@@ -494,13 +505,45 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     }
 
     private func exchange(location: String) async throws {
-        _ = try await getRaw(absoluteAccountURL(location), follow: true)
-        guard let token = cookie("serviceToken"), !token.isEmpty else {
-            throw XiaomiError.failed("没有拿到米家服务凭证。请改用扫码登录")
+        if cookie("serviceToken")?.isEmpty ?? true {
+            _ = try? await getRaw(absoluteAccountURL(location), follow: true)
+        }
+        var token = cookie("serviceToken") ?? ""
+        var waited = 0.0
+        // App 内网页登录时，serviceToken 可能比长轮询拿到的 location 晚一步写进 cookie，
+        // 所以这里多等最多 5 秒，别让用户刚好卡在这个时间差上。
+        while token.isEmpty && waited < 5 {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            waited += 0.5
+            token = cookie("serviceToken") ?? ""
+        }
+        guard !token.isEmpty else {
+            throw XiaomiError.failed("没有拿到米家服务凭证。请用「在 App 内打开确认页并登录」，或改用账号密码登录")
         }
         serviceToken = token
         if userId == nil {
             userId = cookie("userId")
+        }
+    }
+
+    /// 把 WKWebView 自己 cookie 库里的东西搬进来。
+    ///
+    /// `WKWebsiteDataStore` 和 `URLSession` 的 `HTTPCookieStorage` 是两套互不相通的东西：
+    /// 在内嵌网页里登录成功后，serviceToken / userId / cUserId 全落在 WebView 那边，
+    /// 我们自己的请求一个都带不上，才会出现「网页登录成功但没有米家凭证」。
+    func absorbCookies(_ list: [HTTPCookie]) {
+        guard !list.isEmpty else { return }
+        for item in list {
+            cookies.setCookie(item)
+        }
+        if userId == nil, let uid = cookie("userId"), !uid.isEmpty {
+            userId = uid
+        }
+        if cUserId == nil, let cUser = cookie("cUserId"), !cUser.isEmpty {
+            cUserId = cUser
+        }
+        if serviceToken == nil, let token = cookie("serviceToken"), !token.isEmpty {
+            serviceToken = token
         }
     }
 

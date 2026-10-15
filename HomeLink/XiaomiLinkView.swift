@@ -70,7 +70,8 @@ final class XiaomiLinkModel {
         guard !isBusy else { return }
         // 回前台一律立刻重新轮询：挂起前那个在飞的请求已经被系统作废，
         // 指望它自己醒过来是等不到的（这就是「切回来没有任何反应」的原因）。
-        if qrImage != nil, client.hasActiveQR {
+        // 用 hasPendingQR 而不是 hasActiveQR：用户可能在名义过期前一刻才确认。
+        if qrImage != nil, client.hasPendingQR {
             resumeQR()
         } else if qrImage != nil || error != nil || notice != nil || pollTask == nil {
             startQR()
@@ -81,10 +82,22 @@ final class XiaomiLinkModel {
     func recheckNow() {
         guard mode == .qr, !completed else { return }
         notice = "正在重新检查确认结果…"
-        if client.hasActiveQR, qrImage != nil {
+        if qrImage != nil, client.hasPendingQR {
+            // 用户已经确认过了，宽限一段时间，复用同一个 long polling 地址继续等。
+            // 这里千万不能重新生成二维码，否则会把刚确认的会话作废。
+            client.extendQRDeadline(by: 180)
             resumeQR()
         } else {
             startQR()
+        }
+    }
+
+    /// 网页登录那边每加载完一页会把 cookie 递过来，交给会话保存。
+    func absorbWebCookies(_ list: [HTTPCookie]) {
+        client.absorbCookies(list)
+        // 万一凭证已经齐了（比如长轮询结果早就到了），不用再等，直接完成关联。
+        if !completed, let session = client.readySession {
+            finish(session)
         }
     }
 
@@ -265,6 +278,7 @@ final class XiaomiLinkModel {
     }
 
     private func finish(_ session: XiaomiSession) {
+        guard !completed else { return }
         autoRefreshCount = 0
         completed = true
         showWebLogin = false
@@ -344,11 +358,12 @@ struct XiaomiLinkView: View {
             set: { link.showWebLogin = $0 }
         )) {
             if let url = link.loginURL {
-                XiaomiWebLoginView(url: url) {
-                    // 网页侧确认完了，长轮询大概率已经拿到结果；
-                    // 再主动检查一次，避免刚好错过那一轮。
-                    link.recheckNow()
-                }
+                XiaomiWebLoginView(
+                    url: url,
+                    onCookies: { link.absorbWebCookies($0) },
+                    onConfirmed: { link.recheckNow() },
+                    onClose: {}
+                )
             }
         }
         .onAppear {
@@ -445,8 +460,13 @@ struct XiaomiLinkView: View {
                     .font(.footnote)
             }
             if let url = link.loginURL {
-                Link("或在系统浏览器打开确认页", destination: url)
-                    .font(.caption)
+                VStack(alignment: .leading, spacing: 4) {
+                    Link("改用系统浏览器打开确认页", destination: url)
+                        .font(.caption)
+                    Text("外部浏览器里登录不会把凭证传回来，可能仍提示拿不到凭证；优先用上面的「在 App 内打开确认页并登录」。")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }

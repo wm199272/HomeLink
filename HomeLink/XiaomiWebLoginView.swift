@@ -7,8 +7,14 @@ import WebKit
 /// 正在飞的长轮询请求会被作废，回到前台时拿不到「已确认」的结果，
 /// 表现就是「浏览器里登录成功，切回来没有任何反应」。
 /// 用内嵌 WebView 全程留在前台，长轮询就能持续收到结果。
+///
+/// 另有一件必须做的事：`WKWebView` 有自己独立的 cookie 库，
+/// 登录拿到的 serviceToken / userId / cUserId 只会落在那边，
+/// 所以每加载完一页都把 cookie 交给外面，让 URLSession 也能带上这些凭证。
 struct XiaomiWebLoginView: View {
     let url: URL
+    let onCookies: ([HTTPCookie]) -> Void
+    let onConfirmed: () -> Void
     let onClose: () -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -17,14 +23,15 @@ struct XiaomiWebLoginView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                XiaomiWebView(url: url) {
+                XiaomiWebView(url: url, onCookies: onCookies) {
                     isFinished = true
+                    onConfirmed()
                 }
                 .ignoresSafeArea(edges: .bottom)
                 if isFinished {
                     VStack(spacing: 12) {
                         ProgressView()
-                        Text("网页里已经确认，正在等小米把会话回传过来…")
+                        Text("网页里已经确认，正在等小米把会话交过来…")
                             .font(.footnote)
                             .multilineTextAlignment(.center)
                             .foregroundStyle(.secondary)
@@ -50,10 +57,11 @@ struct XiaomiWebLoginView: View {
 
 private struct XiaomiWebView: UIViewRepresentable {
     let url: URL
-    let onReachedCallback: () -> Void
+    let onCookies: ([HTTPCookie]) -> Void
+    let onConfirmed: () -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onReachedCallback: onReachedCallback)
+        Coordinator(onCookies: onCookies, onConfirmed: onConfirmed)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -69,21 +77,39 @@ private struct XiaomiWebView: UIViewRepresentable {
     func updateUIView(_ webView: WKWebView, context: Context) {}
 
     final class Coordinator: NSObject, WKNavigationDelegate {
-        private let onReachedCallback: () -> Void
+        private let onCookies: ([HTTPCookie]) -> Void
+        private let onConfirmed: () -> Void
         private var notified = false
 
-        init(onReachedCallback: @escaping () -> Void) {
-            self.onReachedCallback = onReachedCallback
+        init(onCookies: @escaping ([HTTPCookie]) -> Void, onConfirmed: @escaping () -> Void) {
+            self.onCookies = onCookies
+            self.onConfirmed = onConfirmed
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            guard !notified, let url = webView.url else { return }
-            // 登录成功后小米会跳到 sts.api.io.mi.com 去换米家的服务凭证，
-            // 走到这一步说明网页侧确认已经完成，长轮询那边马上就能拿到结果。
-            let text = url.absoluteString
-            if text.contains("sts.api.io.mi.com") || text.contains("/sts") {
-                notified = true
-                onReachedCallback()
+            harvest(webView)
+        }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            harvest(webView)
+        }
+
+        /// 每加载完一页就把 cookie 搬一次，确认页会在登录过程中跳好几次，
+        /// 这样等长轮询拿到结果时，我们这边已经握有 serviceToken 了。
+        private func harvest(_ webView: WKWebView) {
+            let current = webView.url?.absoluteString ?? ""
+            webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
+                guard let self else { return }
+                DispatchQueue.main.async {
+                    self.onCookies(cookies)
+                    guard !self.notified else { return }
+                    let hasToken = cookies.contains { $0.name == "serviceToken" && !$0.value.isEmpty }
+                    // 走到 sts 说明网页侧已经在换米家的服务凭证了，长轮询那边马上就有结果。
+                    if hasToken || current.contains("/sts") {
+                        self.notified = true
+                        self.onConfirmed()
+                    }
+                }
             }
         }
     }
