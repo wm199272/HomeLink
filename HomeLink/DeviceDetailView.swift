@@ -438,7 +438,7 @@ Task {
                 }
             )) {
                 ForEach(Array(options.enumerated()), id: \.offset) { _, option in
-                    Text(optionTitle(option.description)).tag(option.value)
+                    Text(MiotNaming.optionTitle(option.description)).tag(option.value)
                 }
             }
             .disabled(!device.online)
@@ -599,23 +599,5 @@ Task {
     private func readOnlyText(_ value: JSONScalar?, unit: String?) -> String {
         guard let value else { return "—" }
         return value.displayText + MiotNaming.unitSuffix(unit)
-    }
-
-    private func optionTitle(_ raw: String) -> String {
-        switch raw.lowercased() {
-        case "auto": "自动"
-        case "cool": "制冷"
-        case "heat": "制热"
-        case "dry": "除湿"
-        case "fan": "送风"
-        case "sleep": "睡眠"
-        case "low": "低"
-        case "medium": "中"
-        case "high": "高"
-        case "on": "开"
-        case "off": "关"
-        case "none": "无"
-        default: raw
-        }
     }
 }
