@@ -190,8 +190,10 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
                             try await exchange(location: location)
                         }
                         if let session = currentSession() {
-                            dlog("会话已完整，登录成功 userId=\(session.userId)")
-                            return session
+                            dlog("会话已完整，交给米家验一次 userId=\(session.userId)")
+                            let ready = try await verified(session)
+                            dlog("登录成功 userId=\(ready.userId)")
+                            return ready
                         }
                         dlog("长轮询有结果但会话不完整，缺少：\(sessionMissing()) cookie=[\(cookieNames())]")
                         throw XiaomiError.failed("扫码成功，但没有拿到米家会话，请重新关联")
@@ -306,6 +308,27 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
                 return [legacy]
             }
             throw error
+        }
+    }
+
+    /// 拿会话去米家验一次，确认这套凭证真的能用。
+    ///
+    /// 关联「成功」只说明本地凑齐了 ssecurity / userId / serviceToken，
+    /// 并不代表小米认这套凭证：网页登录拿到的 serviceToken 和长轮询拿到的 ssecurity
+    /// 若不是同一次登录的产物，本地看着齐全，一到设备页就全是「米家接口暂时不可用」。
+    /// 所以这里用最轻的一个接口先问一次，把问题拦在关联这一步。
+    func verifySession(_ session: XiaomiSession) async throws {
+        _ = try await call(session, path: "/v2/user/get_device_cnt", payload: ["fetch_own": true])
+    }
+
+    /// 验过再交出去。验不过就抛出去，让用户当场看到原因，而不是过一会儿在设备页发现全废了。
+    private func verified(_ session: XiaomiSession) async throws -> XiaomiSession {
+        do {
+            try await verifySession(session)
+            return session
+        } catch {
+            dlog("米家不认这套凭证：\(humanize(error))")
+            throw XiaomiError.failed("米家不认刚拿到的登录凭证（\(humanize(error))），请重新关联一次")
         }
     }
 
@@ -606,7 +629,7 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
     /// 会话永远凑不齐，表现就是一直停在「正在等小米把会话交过来」。
     /// 带着账号 cookie 请求 serviceLogin 时，服务端会直接返回 ssecurity 和 location。
     func completeFromAccountCookies() async -> XiaomiSession? {
-        if let session = currentSession() { return session }
+        if let session = currentSession() { return try? await verified(session) }
         var components = URLComponents(string: "https://account.xiaomi.com/pass/serviceLogin")
         components?.queryItems = [
             URLQueryItem(name: "sid", value: "xiaomiio"),
@@ -626,9 +649,13 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         }
         if userId == nil, let uid = cookie("userId"), !uid.isEmpty { userId = uid }
         if serviceToken == nil, let token = cookie("serviceToken"), !token.isEmpty { serviceToken = token }
-        let session = currentSession()
-        dlog("用网页 cookie 换会话结果：\(session != nil ? "成功" : "失败，仍缺 \(sessionMissing())")")
-        return session
+        guard let session = currentSession() else {
+            dlog("用网页 cookie 换会话结果：失败，仍缺 \(sessionMissing())")
+            return nil
+        }
+        let ready = try? await verified(session)
+        dlog("用网页 cookie 换会话结果：\(ready != nil ? "成功" : "米家不认这套凭证")")
+        return ready
     }
 
     /// 当前 cookie 库里有哪些名字（只记名字，不记值，避免泄露凭证）。
@@ -965,10 +992,12 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         request.setValue("PROTOCAL-HTTP2", forHTTPHeaderField: "x-xiaomi-protocal-flag-cli")
         request.setValue("ENCRYPT-RC4", forHTTPHeaderField: "MIOT-ENCRYPT-ALGORITHM")
         request.setValue(cookieHeader(session), forHTTPHeaderField: "Cookie")
-        let (data, http) = try await send(request, followRedirects: true)
+        let (data, http) = try await sendWithRetry(request, path: path)
         guard http.statusCode == 200 else {
-            xiaomiLog.error("mi home http \(http.statusCode, privacy: .public) \(path, privacy: .public)")
-            throw XiaomiError.failed("米家接口暂时不可用（\(http.statusCode)）")
+            let snippet = Self.bodySnippet(data)
+            xiaomiLog.error("mi home http \(http.statusCode, privacy: .public) \(path, privacy: .public) \(snippet, privacy: .public)")
+            dlog("米家接口非 200：\(path) → \(http.statusCode) 响应=\(snippet)")
+            throw XiaomiError.failed("米家接口暂时不可用（\(http.statusCode) \(path)）")
         }
         let object: [String: Any]
         do {
@@ -1055,6 +1084,34 @@ final class XiaomiCloudClient: NSObject, URLSessionTaskDelegate, @unchecked Send
         guard let http = response as? HTTPURLResponse else { throw XiaomiError.invalidResponse }
         captureSetCookie(http)
         return (data, http)
+    }
+
+    /// 限流和偶发 5xx 当次重试一下就好，不必直接丢给用户。
+    ///
+    /// 米家接口偶尔会回 429 / 502 / 503，过一会儿再来一次通常就正常了，
+    /// 原来一次不顺就报「接口暂时不可用」，用户看到的是无意义的失败。
+    private func sendWithRetry(_ request: URLRequest, path: String) async throws -> (Data, HTTPURLResponse) {
+        var attempt = 0
+        while true {
+            let (data, http) = try await send(request, followRedirects: true)
+            if http.statusCode == 200 || !Self.isTransient(http.statusCode) || attempt >= 2 {
+                return (data, http)
+            }
+            attempt += 1
+            dlog("米家接口 \(path) 返回 \(http.statusCode)，第 \(attempt) 次重试")
+            try? await Task.sleep(nanoseconds: UInt64(400_000_000) * UInt64(attempt))
+        }
+    }
+
+    private static func isTransient(_ status: Int) -> Bool {
+        status == 408 || status == 429 || (500...599).contains(status)
+    }
+
+    /// 非 200 时把响应体截一小段出来，用来判断是凭证被拒、限流还是服务端抽风。
+    private static func bodySnippet(_ data: Data, limit: Int = 120) -> String {
+        guard let text = String(data: data.prefix(400), encoding: .utf8) else { return "（二进制）" }
+        let flat = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return flat.isEmpty ? "（空）" : String(flat.prefix(limit))
     }
 
     /// 把响应里的 Set-Cookie 也记进本地表。

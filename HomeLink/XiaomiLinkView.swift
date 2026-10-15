@@ -90,14 +90,10 @@ final class XiaomiLinkModel {
     /// 网页登录那边每加载完一页会把 cookie 递过来，交给会话保存。
     func absorbWebCookies(_ list: [HTTPCookie]) {
         client.absorbCookies(list)
-        // 万一凭证已经齐了（比如长轮询结果早就到了），不用再等，直接完成关联。
-        if !completed, let session = client.readySession {
-            dlog("网页 cookie 补齐了全部凭证，直接完成关联")
-            finish(session)
-            return
-        }
         // 光有 serviceToken / userId 还不够，ssecurity 只能从账号接口拿。
         // 攒到 cookie 之后再用它们换一次完整会话；多次回调只跑最后一次。
+        // 注意：这里不再"凭证齐了就直接完成关联"，那条捷径会跳过米家的校验，
+        // 结果是关联报成功、设备页却全是接口不可用。
         rescueTask?.cancel()
         rescueTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 700_000_000)
