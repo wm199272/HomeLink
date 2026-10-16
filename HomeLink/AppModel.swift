@@ -623,8 +623,10 @@ final class AppModel {
         } else if result.message == nil {
             accounts[index].needsRelogin = false
         }
-        if let keys = result.greeKeys {
-            accounts[index].gree?.deviceKeys = keys
+        if let keys = result.greeKeys, !keys.isEmpty {
+            var merged = accounts[index].gree?.deviceKeys ?? [:]
+            for (mac, key) in keys { merged[mac] = key }
+            accounts[index].gree?.deviceKeys = merged
         }
         if let session = result.qihoo {
             accounts[index].qihoo = session

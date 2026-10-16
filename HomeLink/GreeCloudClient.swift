@@ -21,12 +21,13 @@ enum GreeCloudClient {
         ]
         let data = try await post(host: region.host, path: "/App/UserLoginV2", payload: body, hashKeys: ["user", "psw", "t"], now: now)
         if let error = failure(data, name: "格力+") { throw error }
-        let bag = (data["data"] as? [String: Any]) ?? data
+        let bag = nestedBag(data)
         guard let userId = idText(bag["uid"]) ?? idText(data["uid"]),
               let token = jsonString(bag["token"]) ?? jsonString(data["token"]),
               !token.isEmpty else {
-            throw CloudError.failed(jsonString(data["msg"]) ?? "格力登录没有返回会话")
+            throw CloudError.failed(jsonString(data["msg"]) ?? jsonString(bag["msg"]) ?? "格力登录没有返回会话")
         }
+        dlog("gree login ok uid=\(userId) host=\(region.host)")
         return GreeSession(
             userId: userId,
             token: token,
@@ -39,20 +40,28 @@ enum GreeCloudClient {
 
     static func fetchHomes(account: LinkedAccount) async throws -> (homes: [IoTHome], keys: [String: String]) {
         guard let session = account.gree else { throw CloudError.sessionExpired("格力+") }
-        let homesData = try await post(
+        var keys: [String: String] = session.deviceKeys
+        var homes: [IoTHome] = []
+
+        let homesData = nestedBag(try await post(
             host: session.host,
             path: "/App/GetHomes",
             payload: ["token": session.token, "uid": uidNumber(session.userId)],
             hashKeys: ["token", "uid"]
-        )
+        ))
         if let error = failure(homesData, name: "格力+") { throw error }
-        let homeRows = (homesData["home"] as? [Any]) ?? (homesData["homes"] as? [Any]) ?? []
-        var keys: [String: String] = [:]
-        var homes: [IoTHome] = []
+        var homeRows = jsonArray(homesData, "home", "homes")
+        dlog("gree GetHomes fields=\(homesData.keys.sorted()) rows=\(homeRows.count)")
+
         if homeRows.isEmpty {
-            homes.append(emptyHome(account: account, homeId: "gree", name: "格力+"))
-            return (homes, keys)
+            let bundled = try await fetchUserHomes(account: account, session: session)
+            if bundled.homes.contains(where: { $0.rooms.contains { !$0.devices.isEmpty } }) {
+                return try await finishFetch(account: account, session: session, homes: bundled.homes, keys: bundled.keys)
+            }
+            dlog("gree no homes from GetHomes or GetDevsOfUserHomes")
+            return ([emptyHome(account: account, homeId: "gree", name: "格力+")], keys)
         }
+
         for row in homeRows {
             guard let home = row as? [String: Any] else { continue }
             let homeId = idText(home["id"]) ?? idText(home["homeId"]) ?? "gree"
@@ -61,26 +70,81 @@ enum GreeCloudClient {
             if let raw = home["id"] ?? home["homeId"], !(raw is NSNull) {
                 homeValue = raw
             }
-            let devicesData = try await post(
+            let devicesData = nestedBag(try await post(
                 host: session.host,
                 path: "/App/GetDevsInRoomsOfHomeV2",
                 payload: ["token": session.token, "homeId": homeValue, "uid": uidNumber(session.userId)],
                 hashKeys: ["token", "uid", "homeId"]
-            )
+            ))
             if let error = failure(devicesData, name: "格力+") { throw error }
-            let built = devices(account: account, homeId: homeId, homeName: homeName.isEmpty ? "格力+" : homeName, data: devicesData)
+            dlog("gree GetDevsInRoomsOfHomeV2 home=\(homeId) fields=\(devicesData.keys.sorted())")
+            var built = devices(account: account, homeId: homeId, homeName: homeName.isEmpty ? "格力+" : homeName, data: devicesData)
+            if built.home.rooms.allSatisfy(\.devices.isEmpty) {
+                let fromHome = devices(account: account, homeId: homeId, homeName: homeName.isEmpty ? "格力+" : homeName, data: home)
+                if !fromHome.home.rooms.allSatisfy(\.devices.isEmpty) {
+                    built = fromHome
+                }
+            }
             for pair in built.keys { keys[pair.key] = pair.value }
             homes.append(built.home)
         }
-        let powers = await readPowers(session: session, keys: keys)
-        homes = homes.map { home in
+
+        if homes.allSatisfy({ $0.rooms.allSatisfy(\.devices.isEmpty) }) {
+            dlog("gree rooms empty, trying GetDevsOfUserHomes")
+            let bundled = try await fetchUserHomes(account: account, session: session)
+            if bundled.homes.contains(where: { $0.rooms.contains { !$0.devices.isEmpty } }) {
+                homes = bundled.homes
+                for pair in bundled.keys { keys[pair.key] = pair.value }
+            }
+        }
+
+        return try await finishFetch(account: account, session: session, homes: homes, keys: keys)
+    }
+
+    private static func fetchUserHomes(account: LinkedAccount, session: GreeSession) async throws -> (homes: [IoTHome], keys: [String: String]) {
+        let data = nestedBag(try await post(
+            host: session.host,
+            path: "/App/GetDevsOfUserHomes",
+            payload: ["token": session.token, "uid": uidNumber(session.userId)],
+            hashKeys: ["token", "uid"]
+        ))
+        if let error = failure(data, name: "格力+") { throw error }
+        dlog("gree GetDevsOfUserHomes fields=\(data.keys.sorted())")
+        var keys: [String: String] = [:]
+        var homes: [IoTHome] = []
+        let rows = jsonArray(data, "homes", "home")
+        if rows.isEmpty {
+            let built = devices(account: account, homeId: "gree", homeName: "格力+", data: data)
+            return ([built.home], built.keys)
+        }
+        for row in rows {
+            guard let home = row as? [String: Any] else { continue }
+            let homeId = idText(home["id"]) ?? idText(home["homeId"]) ?? "gree"
+            let homeName = (jsonString(home["name"]) ?? jsonString(home["homeName"]) ?? "格力+").trimmingCharacters(in: .whitespaces)
+            let built = devices(account: account, homeId: homeId, homeName: homeName.isEmpty ? "格力+" : homeName, data: home)
+            for pair in built.keys { keys[pair.key] = pair.value }
+            homes.append(built.home)
+        }
+        return (homes, keys)
+    }
+
+    private static func finishFetch(
+        account: LinkedAccount,
+        session: GreeSession,
+        homes: [IoTHome],
+        keys: [String: String]
+    ) async throws -> (homes: [IoTHome], keys: [String: String]) {
+        let deviceCount = homes.reduce(0) { $0 + $1.rooms.reduce(0) { $0 + $1.devices.count } }
+        dlog("gree devices=\(deviceCount) keys=\(Set(keys.keys).count)")
+        let flags = await queryOnlineFlags(session: session, macs: Array(Set(homes.flatMap { $0.rooms.flatMap(\.devices).map(\.did) })))
+        let marked = homes.map { home -> IoTHome in
             var copy = home
             copy.rooms = home.rooms.map { room in
                 var next = room
                 next.devices = room.devices.map { device in
                     var item = device
-                    if let on = powers[device.did] {
-                        item.power = on ? .on : .off
+                    if let online = flags[device.did] ?? flags[parentMAC(device.did)] {
+                        item.online = online
                     }
                     return item
                 }
@@ -88,7 +152,10 @@ enum GreeCloudClient {
             }
             return copy
         }
-        return (homes, keys)
+        if marked.allSatisfy({ $0.rooms.allSatisfy(\.devices.isEmpty) }) {
+            return ([emptyHome(account: account, homeId: "gree", name: "格力+")], keys)
+        }
+        return (marked, keys)
     }
 
     /// 格力+ 里能操作的列都问一遍。设备不认的列不会出现在返回里，
@@ -99,7 +166,7 @@ enum GreeCloudClient {
     ]
 
     static func readClimate(session: GreeSession, mac: String) async throws -> GreeClimate {
-        guard let key = session.deviceKeys[mac] else {
+        guard let key = deviceKey(session: session, mac: mac) else {
             throw CloudError.failed("还没有这台空调的通信密钥，下拉同步后再试")
         }
         var values: [String: Int]
@@ -113,8 +180,6 @@ enum GreeCloudClient {
                 columns: climateColumns
             )
         } catch {
-            // 少数老固件只认最基础的那几列，宽查询可能被它无视。退回窄集合再问一次，
-            // 免得为了多出来的摆风、辅热反而连开关都读不到。
             values = try await exchange(
                 session: session,
                 mac: mac,
@@ -146,7 +211,7 @@ enum GreeCloudClient {
         fan: Int?,
         flags: [String: Int] = [:]
     ) async throws {
-        guard let key = session.deviceKeys[mac] else {
+        guard let key = deviceKey(session: session, mac: mac) else {
             throw CloudError.failed("还没有这台空调的通信密钥，下拉同步后再试")
         }
         var commands: [(String, Int)] = []
@@ -167,45 +232,80 @@ enum GreeCloudClient {
         query: Bool,
         columns: [String] = ["Pow", "Mod", "SetTem", "WdSpd"]
     ) async throws -> [String: Int] {
+        let packJSON = try commandJSON(mac: mac, commands: commands, query: query, columns: columns)
+        let pack = try encrypt(packJSON, key: key)
         guard let uid = Int(session.userId) else { throw CloudError.failed("格力用户编号无效") }
+        let body = envelope(uid: uid, tcid: mac, pack: pack)
+        dlog("gree exchange mac=\(redactMAC(mac)) query=\(query) cmds=\(commands.map(\.0))")
+
+        if let route = await queryRoute(session: session, mac: mac) {
+            do {
+                let values = try await tcpExchange(route: route, json: body, mac: mac, key: key, query: query)
+                if !query || values["Pow"] != nil { return values }
+                dlog("gree tcp no Pow, falling back to mqtt")
+            } catch {
+                dlog("gree tcp failed: \(error.localizedDescription)")
+            }
+        }
+
+        return try await mqttExchange(session: session, mac: mac, key: key, body: body, query: query)
+    }
+
+    private static func commandJSON(mac: String, commands: [(String, Int)], query: Bool, columns: [String]) throws -> String {
+        if query {
+            let list = columns.map { "\"\($0)\"" }.joined(separator: ", ")
+            return "{\"t\":\"status\",\"mac\":\"\(mac)\",\"cols\":[\(list)]}"
+        }
+        let opts = commands.map { "\"\($0.0)\"" }.joined(separator: ", ")
+        let values = commands.map { String($0.1) }.joined(separator: ", ")
+        return "{\"t\":\"cmd\",\"mac\":\"\(mac)\",\"opt\":[\(opts)],\"p\":[\(values)]}"
+    }
+
+    private static func tcpExchange(
+        route: (host: String, port: UInt16, tls: Bool),
+        json: String,
+        mac: String,
+        key: String,
+        query: Bool
+    ) async throws -> [String: Int] {
+        dlog("gree tcp \(route.host):\(route.port) tls=\(route.tls)")
+        let data = try await GreeLineSocket.exchange(host: route.host, port: route.port, useTLS: route.tls, json: json)
+        if !query { return decodeValues(data, mac: mac, key: key) }
+        let values = decodeValues(data, mac: mac, key: key)
+        guard values["Pow"] != nil else { throw CloudError.failed("空调没有回应") }
+        return values
+    }
+
+    private static func mqttExchange(
+        session: GreeSession,
+        mac: String,
+        key: String,
+        body: String,
+        query: Bool
+    ) async throws -> [String: Int] {
         let mqtt = MiniMQTT(host: session.mqttHost, port: 1984)
         defer { mqtt.close() }
         let parent = parentMAC(mac)
         try await mqtt.connect(clientID: "app_\(CloudCrypto.randomHex(bytes: 8))", username: session.userId, password: session.token)
         try await mqtt.subscribe(topic: "response/\(parent)/#")
         try await mqtt.subscribe(topic: "status/\(parent)/#")
-        if query {
-            let list = columns.map { "\"\($0)\"" }.joined(separator: ", ")
-            let request = "{\"t\": \"status\", \"cols\": [\(list)]}"
-            let pack = try encrypt(request, key: key)
-            try await mqtt.publish(topic: "request/\(parent)", payload: Data(envelope(uid: uid, tcid: mac, pack: pack).utf8))
+        if parent != mac {
+            try await mqtt.subscribe(topic: "response/\(mac)/#")
+            try await mqtt.subscribe(topic: "status/\(mac)/#")
         }
-        for command in commands {
-            let inner = "{\"t\": \"cmd\", \"opt\": [\"\(command.0)\"], \"p\": [\(command.1)]}"
-            let body = envelope(uid: uid, tcid: mac, pack: try encrypt(inner, key: key))
-            try await mqtt.publish(topic: "request/\(parent)", payload: Data(body.utf8))
+        let payload = Data(body.utf8)
+        try await mqtt.publish(topic: "request/\(parent)", payload: payload)
+        if parent != mac {
+            try await mqtt.publish(topic: "request/\(mac)", payload: payload)
         }
         if !query { return [:] }
         let deadline = Date().addingTimeInterval(8)
         var values: [String: Int] = [:]
         var grace: Date?
         while true {
-            // 空调可能把状态拆成几条发。第一条里带上 Pow 之后再多等 1.2 秒，
-            // 把摆风、辅热这些其它列一起收进来。
             guard let message = try await mqtt.readPublish(until: grace ?? deadline) else { break }
-            guard let object = try? JSONSerialization.jsonObject(with: message.1) as? [String: Any],
-                  let pack = jsonString(object["pack"]) else { continue }
-            let tcid = jsonString(object["tcid"]) ?? ""
-            guard tcid.isEmpty || tcid == mac || parentMAC(tcid) == parent else { continue }
-            guard let plain = try? decrypt(pack, key: key, tag: jsonString(object["tag"])),
-                  let parsed = try? JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any],
-                  let cols = parsed["cols"] as? [Any],
-                  let dat = parsed["dat"] as? [Any] else { continue }
-            for (index, name) in cols.enumerated() where index < dat.count {
-                if let column = jsonString(name), let value = jsonInt(dat[index]) {
-                    values[column] = value
-                }
-            }
+            let decoded = decodeValues(message.1, mac: mac, key: key)
+            for (column, value) in decoded { values[column] = value }
             if values["Pow"] != nil, grace == nil {
                 grace = Date().addingTimeInterval(1.2)
             }
@@ -216,64 +316,77 @@ enum GreeCloudClient {
         return values
     }
 
-    private static func readPowers(session: GreeSession, keys: [String: String]) async -> [String: Bool] {
-        guard !keys.isEmpty, let uid = Int(session.userId) else { return [:] }
-        do {
-            return try await readPowersBody(session: session, keys: keys, uid: uid)
-        } catch {
-            return [:]
+    private static func decodeValues(_ data: Data, mac: String, key: String) -> [String: Int] {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [:] }
+        let tcid = jsonString(object["tcid"]) ?? jsonString(object["cid"]) ?? ""
+        if !tcid.isEmpty, tcid != mac, parentMAC(tcid) != parentMAC(mac) { return [:] }
+        guard let pack = jsonString(object["pack"]),
+              let plain = try? decrypt(pack, key: key, tag: jsonString(object["tag"])),
+              let parsed = try? JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any] else { return [:] }
+        var values: [String: Int] = [:]
+        if let cols = parsed["cols"] as? [Any], let dat = parsed["dat"] as? [Any] {
+            for (index, name) in cols.enumerated() where index < dat.count {
+                if let column = jsonString(name), let value = jsonInt(dat[index]) {
+                    values[column] = value
+                }
+            }
         }
+        if let opt = parsed["opt"] as? [Any], let p = parsed["p"] as? [Any] {
+            for (index, name) in opt.enumerated() where index < p.count {
+                if let column = jsonString(name), let value = jsonInt(p[index]) {
+                    values[column] = value
+                }
+            }
+        }
+        return values
     }
 
-    private static func readPowersBody(session: GreeSession, keys: [String: String], uid: Int) async throws -> [String: Bool] {
-        let mqtt = MiniMQTT(host: session.mqttHost, port: 1984)
-        defer { mqtt.close() }
-        try await mqtt.connect(clientID: "app_\(CloudCrypto.randomHex(bytes: 8))", username: session.userId, password: session.token)
-        var pending = Set(keys.keys)
-        for mac in keys.keys {
-            let parent = parentMAC(mac)
-            guard let key = keys[mac] else { continue }
-            do {
-                try await mqtt.subscribe(topic: "response/\(parent)/#")
-                try await mqtt.subscribe(topic: "status/\(parent)/#")
-                let pack = try encrypt("{\"t\": \"status\", \"cols\": [\"Pow\"]}", key: key)
-                try await mqtt.publish(topic: "request/\(parent)", payload: Data(envelope(uid: uid, tcid: mac, pack: pack).utf8))
-            } catch {
-                pending.remove(mac)
-            }
+    private static func queryRoute(session: GreeSession, mac: String) async -> (host: String, port: UInt16, tls: Bool)? {
+        let rows = await queryOnline(session: session, macs: [mac, parentMAC(mac)])
+        for item in rows.online {
+            guard let svr = jsonString(item["svr"]), let colon = svr.lastIndex(of: ":") else { continue }
+            let host = String(svr[..<colon])
+            guard let port = UInt16(String(svr[svr.index(after: colon)...])), !host.isEmpty, port > 0 else { continue }
+            return (host, port, sslFlag(item["isSSL"]))
         }
-        var found: [String: Bool] = [:]
-        let deadline = Date().addingTimeInterval(8)
-        while !pending.isEmpty {
-            let message: (String, Data)?
-            do {
-                message = try await mqtt.readPublish(until: deadline)
-            } catch {
-                break
-            }
-            guard let message else { break }
-            guard let object = try? JSONSerialization.jsonObject(with: message.1) as? [String: Any],
-                  let pack = jsonString(object["pack"]) else { continue }
-            let tcid = jsonString(object["tcid"]) ?? ""
-            let topicMAC = message.0.split(separator: "/").dropFirst().first.map(String.init) ?? ""
-            let mac = pending.first { candidate in
-                if !tcid.isEmpty {
-                    return candidate == tcid || parentMAC(candidate) == parentMAC(tcid)
-                }
-                return candidate == topicMAC || parentMAC(candidate) == topicMAC
-            }
-            guard let mac, let key = keys[mac] else { continue }
-            guard let plain = try? decrypt(pack, key: key, tag: jsonString(object["tag"])),
-                  let parsed = try? JSONSerialization.jsonObject(with: Data(plain.utf8)) as? [String: Any],
-                  let cols = parsed["cols"] as? [Any],
-                  let dat = parsed["dat"] as? [Any],
-                  let index = cols.firstIndex(where: { jsonString($0) == "Pow" }),
-                  index < dat.count,
-                  let power = jsonInt(dat[index]) else { continue }
-            found[mac] = power != 0
-            pending.remove(mac)
+        return nil
+    }
+
+    private static func queryOnlineFlags(session: GreeSession, macs: [String]) async -> [String: Bool] {
+        guard !macs.isEmpty else { return [:] }
+        let result = await queryOnline(session: session, macs: macs)
+        var flags: [String: Bool] = [:]
+        for item in result.online {
+            if let mac = jsonString(item["mac"]) { flags[mac] = true }
         }
-        return found
+        for item in result.offline {
+            if let mac = jsonString(item["mac"]) { flags[mac] = false }
+        }
+        return flags
+    }
+
+    private static func queryOnline(session: GreeSession, macs: [String]) async -> (online: [[String: Any]], offline: [[String: Any]]) {
+        let unique = Array(Set(macs.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.filter { !$0.isEmpty }))
+        guard !unique.isEmpty else { return ([], []) }
+        do {
+            let data = nestedBag(try await post(
+                host: session.host,
+                path: "/App/QueryOnline",
+                payload: ["token": session.token, "uid": uidNumber(session.userId), "macs": unique],
+                hashKeys: ["token", "uid"]
+            ))
+            if let error = failure(data, name: "格力+") {
+                dlog("gree QueryOnline rejected \(error.localizedDescription)")
+                return ([], [])
+            }
+            let online = jsonArray(data, "online").compactMap { $0 as? [String: Any] }
+            let offline = jsonArray(data, "offline").compactMap { $0 as? [String: Any] }
+            dlog("gree QueryOnline online=\(online.count) offline=\(offline.count) fields=\(data.keys.sorted())")
+            return (online, offline)
+        } catch {
+            dlog("gree QueryOnline error \(error.localizedDescription)")
+            return ([], [])
+        }
     }
 
     private static func devices(
@@ -282,29 +395,14 @@ enum GreeCloudClient {
         homeName: String,
         data: [String: Any]
     ) -> (home: IoTHome, keys: [String: String]) {
-        let rooms = (data["rooms"] as? [Any]) ?? []
+        var keyed: [String: (name: String, model: String, online: Bool, room: String)] = [:]
+        var keys: [String: String] = [:]
+        collectDevices(data, room: "未分配房间", keyed: &keyed, keys: &keys)
+        dlog("gree parsed macs=\(keyed.count) withKey=\(keys.count)")
+        let kept = filterDuplicates(Array(keyed.keys), keys: keys)
         var buckets: [String: [IoTDevice]] = [:]
         var names: [String: String] = [:]
         var order: [String] = []
-        var keyed: [String: (name: String, model: String, online: Bool, room: String)] = [:]
-        var keys: [String: String] = [:]
-        for row in rooms {
-            guard let room = row as? [String: Any] else { continue }
-            let roomName = (jsonString(room["name"]) ?? jsonString(room["roomName"]) ?? "未分配房间").trimmingCharacters(in: .whitespaces)
-            let devs = (room["devs"] as? [Any]) ?? []
-            for item in devs {
-                guard let dev = item as? [String: Any] else { continue }
-                let mac = (jsonString(dev["mac"]) ?? "").trimmingCharacters(in: .whitespaces)
-                let key = (jsonString(dev["key"]) ?? "").trimmingCharacters(in: .whitespaces)
-                guard !mac.isEmpty else { continue }
-                let name = (jsonString(dev["name"]) ?? "空调").trimmingCharacters(in: .whitespaces)
-                let model = (jsonString(dev["model"]) ?? jsonString(dev["ver"]) ?? "").trimmingCharacters(in: .whitespaces)
-                let online = dev["online"] == nil ? true : onlineFlag(dev["online"])
-                keyed[mac] = (name.isEmpty ? "空调" : name, model, online, roomName.isEmpty ? "未分配房间" : roomName)
-                if !key.isEmpty { keys[mac] = key }
-            }
-        }
-        let kept = filterDuplicates(Array(keyed.keys), keys: keys)
         for mac in kept {
             guard let info = keyed[mac] else { continue }
             let roomId = info.room
@@ -346,7 +444,69 @@ enum GreeCloudClient {
             accountId: account.id,
             rooms: roomList.isEmpty ? [IoTRoom(id: "\(account.id.uuidString)|gree|\(homeId)|empty", name: "全部设备", devices: [])] : roomList
         )
-        return (home, keys.filter { kept.contains($0.key) })
+        var stored: [String: String] = [:]
+        for mac in kept {
+            if let key = keys[mac] ?? keys[parentMAC(mac)] {
+                stored[mac] = key
+                stored[parentMAC(mac)] = key
+            }
+        }
+        return (home, stored)
+    }
+
+    private static func collectDevices(
+        _ node: Any,
+        room: String,
+        keyed: inout [String: (name: String, model: String, online: Bool, room: String)],
+        keys: inout [String: String]
+    ) {
+        if let items = node as? [Any] {
+            for item in items {
+                collectDevices(item, room: room, keyed: &keyed, keys: &keys)
+            }
+            return
+        }
+        guard let dict = node as? [String: Any] else { return }
+        let roomName = (jsonString(dict["name"]) ?? jsonString(dict["roomName"]) ?? room).trimmingCharacters(in: .whitespaces)
+        if let mac = deviceMAC(dict) {
+            let secret = deviceSecret(dict)
+            let name = (jsonString(dict["name"]) ?? jsonString(dict["devName"]) ?? "空调").trimmingCharacters(in: .whitespaces)
+            let model = (jsonString(dict["model"]) ?? jsonString(dict["ver"]) ?? jsonString(dict["type"]) ?? "").trimmingCharacters(in: .whitespaces)
+            let online = dict["online"] == nil ? true : onlineFlag(dict["online"])
+            keyed[mac] = (name.isEmpty ? "空调" : name, model, online, roomName.isEmpty ? "未分配房间" : roomName)
+            if let secret {
+                keys[mac] = secret
+                keys[parentMAC(mac)] = secret
+            } else if keyed.count <= 8 {
+                dlog("gree device fields=\(dict.keys.sorted()) mac=\(redactMAC(mac))")
+            }
+        }
+        for key in ["rooms", "devs", "devices", "list", "devList", "home"] {
+            if let nested = dict[key] {
+                let nextRoom = key == "rooms" ? room : roomName
+                collectDevices(nested, room: nextRoom.isEmpty ? room : nextRoom, keyed: &keyed, keys: &keys)
+            }
+        }
+    }
+
+    private static func deviceMAC(_ dev: [String: Any]) -> String? {
+        let raw = jsonString(dev["mac"]) ?? jsonString(dev["mid"]) ?? jsonString(dev["deviceMac"]) ?? jsonString(dev["Mac"])
+        let mac = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard mac.count >= 8 else { return nil }
+        return mac
+    }
+
+    private static func deviceSecret(_ dev: [String: Any]) -> String? {
+        let raw = jsonString(dev["key"]) ?? jsonString(dev["pkey"]) ?? jsonString(dev["secret"]) ?? jsonString(dev["aesKey"])
+        let key = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return key.isEmpty ? nil : key
+    }
+
+    private static func deviceKey(session: GreeSession, mac: String) -> String? {
+        if let key = session.deviceKeys[mac], !key.isEmpty { return key }
+        let parent = parentMAC(mac)
+        if let key = session.deviceKeys[parent], !key.isEmpty { return key }
+        return session.deviceKeys.first { parentMAC($0.key) == parent }?.value
     }
 
     private static func filterDuplicates(_ macs: [String], keys: [String: String]) -> [String] {
@@ -403,14 +563,35 @@ enum GreeCloudClient {
             throw CloudError.invalidResponse
         }
         guard let enRes = jsonString(envelope["enRes"]) else {
-            if envelope["r"] != nil { return envelope }
+            if envelope["r"] != nil { return nestedBag(envelope) }
             throw CloudError.invalidResponse
         }
         let plain = try CloudCrypto.aesECB(.decrypt, data: Data(base64Encoded: enRes) ?? Data(), key: aesKey)
         guard let object = try JSONSerialization.jsonObject(with: plain) as? [String: Any] else {
             throw CloudError.invalidResponse
         }
-        return object
+        return nestedBag(object)
+    }
+
+    private static func nestedBag(_ data: [String: Any]) -> [String: Any] {
+        var merged = data
+        if let inner = data["data"] as? [String: Any] {
+            for (key, value) in inner {
+                merged[key] = value
+            }
+        } else if let list = data["data"] as? [Any] {
+            if merged["home"] == nil { merged["home"] = list }
+            if merged["homes"] == nil { merged["homes"] = list }
+        }
+        return merged
+    }
+
+    private static func jsonArray(_ data: [String: Any], _ keys: String...) -> [Any] {
+        for key in keys {
+            if let rows = data[key] as? [Any] { return rows }
+            if let one = data[key] as? [String: Any] { return [one] }
+        }
+        return []
     }
 
     private static func encrypt(_ json: String, key: String) throws -> String {
@@ -446,6 +627,11 @@ enum GreeCloudClient {
     private static func parentMAC(_ mac: String) -> String {
         if mac.hasSuffix("00"), mac.count > 12 { return String(mac.dropLast(2)) }
         return mac
+    }
+
+    private static func redactMAC(_ mac: String) -> String {
+        guard mac.count > 4 else { return "****" }
+        return String(repeating: "*", count: mac.count - 4) + mac.suffix(4)
     }
 
     private static func failure(_ data: [String: Any], name: String) -> CloudError? {
@@ -485,5 +671,11 @@ enum GreeCloudClient {
         if isJSONBool(value) { return (value as? NSNumber)?.boolValue ?? false }
         if let number = jsonInt(value) { return number != 0 }
         return true
+    }
+
+    private static func sslFlag(_ value: Any?) -> Bool {
+        if isJSONBool(value) { return (value as? NSNumber)?.boolValue ?? false }
+        if let number = jsonInt(value) { return number != 0 }
+        return false
     }
 }

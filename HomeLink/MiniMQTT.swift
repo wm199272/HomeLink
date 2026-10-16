@@ -35,6 +35,18 @@ final class MiniMQTT: @unchecked Sendable {
     func subscribe(topic: String) async throws {
         let id = nextID()
         try await send(Self.subscribePacket(id: id, topic: topic))
+        // 等 SUBACK，避免订阅还没生效就把状态问出去。
+        let deadline = Date().addingTimeInterval(4)
+        while Date() < deadline {
+            guard let packet = try await nextPacket(timeout: max(0.2, deadline.timeIntervalSinceNow)) else { break }
+            if packet.first == 0x90 { return }
+            if (packet.first ?? 0) >> 4 == 3 {
+                lock.lock()
+                buffer.insert(contentsOf: packet, at: buffer.startIndex)
+                lock.unlock()
+                return
+            }
+        }
     }
 
     func publish(topic: String, payload: Data) async throws {
@@ -266,5 +278,132 @@ final class MiniMQTT: @unchecked Sendable {
             data.append(digit)
         } while value > 0
         return data
+    }
+}
+
+/// 格力 QueryOnline 返回的 `svr` 是一次性 JSON 行协议：连上、写一行、读一行、断开。
+final class GreeLineSocket: @unchecked Sendable {
+    static func exchange(host: String, port: UInt16, useTLS: Bool, json: String, timeout: TimeInterval = 8) async throws -> Data {
+        let params: NWParameters
+        if useTLS {
+            let tls = NWProtocolTLS.Options()
+            let queue = DispatchQueue(label: "app.homelink.gree.tls")
+            sec_protocol_options_set_verify_block(tls.securityProtocolOptions, { _, _, complete in
+                complete(true)
+            }, queue)
+            params = NWParameters(tls: tls)
+        } else {
+            params = .tcp
+        }
+        let connection = NWConnection(
+            host: NWEndpoint.Host(host),
+            port: NWEndpoint.Port(rawValue: port) ?? 16385,
+            using: params
+        )
+        defer { connection.cancel() }
+        try await ready(connection)
+        var line = Data(json.utf8)
+        if line.last != 0x0A { line.append(0x0A) }
+        try await send(connection, line)
+        return try await readJSON(connection, timeout: timeout)
+    }
+
+    private static func ready(_ connection: NWConnection) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            let gate = NSLock()
+            var resumed = false
+            func finish(_ result: Result<Void, Error>) {
+                gate.lock()
+                defer { gate.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                cont.resume(with: result)
+            }
+            connection.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    finish(.success(()))
+                case let .failed(error):
+                    finish(.failure(error))
+                case .cancelled:
+                    finish(.failure(CloudError.failed("连接已取消")))
+                default:
+                    break
+                }
+            }
+            connection.start(queue: DispatchQueue(label: "app.homelink.gree.tcp"))
+        }
+    }
+
+    private static func send(_ connection: NWConnection, _ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            connection.send(content: data, completion: .contentProcessed { error in
+                if let error {
+                    cont.resume(throwing: error)
+                } else {
+                    cont.resume()
+                }
+            })
+        }
+    }
+
+    private static func readJSON(_ connection: NWConnection, timeout: TimeInterval) async throws -> Data {
+        let deadline = Date().addingTimeInterval(timeout)
+        var buffer = Data()
+        while Date() < deadline {
+            let chunk: Data = try await withCheckedThrowingContinuation { cont in
+                connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
+                    if let error {
+                        cont.resume(throwing: error)
+                    } else if let data, !data.isEmpty {
+                        cont.resume(returning: data)
+                    } else if isComplete {
+                        cont.resume(returning: Data())
+                    } else {
+                        cont.resume(returning: Data())
+                    }
+                }
+            }
+            if chunk.isEmpty { break }
+            buffer.append(chunk)
+            if let object = firstJSONObject(in: buffer) {
+                return object
+            }
+        }
+        if let object = firstJSONObject(in: buffer) {
+            return object
+        }
+        throw CloudError.failed("空调没有回应")
+    }
+
+    private static func firstJSONObject(in buffer: Data) -> Data? {
+        guard let start = buffer.firstIndex(of: 0x7B) else { return nil }
+        var depth = 0
+        var inString = false
+        var escape = false
+        for index in buffer[start...].indices {
+            let byte = buffer[index]
+            if inString {
+                if escape {
+                    escape = false
+                } else if byte == 0x5C {
+                    escape = true
+                } else if byte == 0x22 {
+                    inString = false
+                }
+                continue
+            }
+            if byte == 0x22 {
+                inString = true
+            } else if byte == 0x7B {
+                depth += 1
+            } else if byte == 0x7D {
+                depth -= 1
+                if depth == 0 {
+                    return Data(buffer[start...index])
+                }
+            }
+        }
+        return nil
     }
 }
